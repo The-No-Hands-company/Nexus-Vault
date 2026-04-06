@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>DevVault</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600&family=IBM+Plex+Sans:wght@300;400;500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg:       #0a0b0d;
+    --surface:  #111318;
+    --border:   #1e2128;
+    --border2:  #2a2f3a;
+    --text:     #c8cdd8;
+    --muted:    #5a6070;
+    --accent:   #00e5a0;
+    --accent2:  #0099ff;
+    --danger:   #ff4455;
+    --warn:     #ffaa00;
+    --success:  #00e5a0;
+    --mono:     'IBM Plex Mono', monospace;
+    --sans:     'IBM Plex Sans', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.6;
+    min-height: 100vh;
+  }
+
+  /* ── Layout ── */
+  #app { display: flex; flex-direction: column; min-height: 100vh; }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    height: 52px;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    position: sticky; top: 0; z-index: 100;
+  }
+
+  .logo {
+    display: flex; align-items: center; gap: 10px;
+    font-size: 15px; font-weight: 600; letter-spacing: 0.06em;
+    color: var(--accent);
+  }
+
+  .logo svg { opacity: 0.85; }
+
+  .header-right { display: flex; align-items: center; gap: 12px; }
+
+  .token-input-wrap {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--bg);
+    border: 1px solid var(--border2);
+    border-radius: 4px;
+    padding: 4px 10px;
+  }
+  .token-input-wrap label { color: var(--muted); font-size: 11px; }
+  .token-input-wrap input {
+    background: transparent; border: none; outline: none;
+    color: var(--text); font-family: var(--mono); font-size: 12px;
+    width: 220px;
+  }
+
+  .status-dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--muted); transition: background 0.3s;
+  }
+  .status-dot.ok  { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+  .status-dot.err { background: var(--danger); }
+
+  main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    grid-template-rows: auto 1fr;
+    gap: 0;
+    max-width: 1400px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 0;
+  }
+
+  /* ── Sidebar ── */
+  aside {
+    grid-row: 1 / 3;
+    border-right: 1px solid var(--border);
+    padding: 20px 0;
+  }
+
+  .nav-section { margin-bottom: 24px; }
+  .nav-label {
+    padding: 0 16px 8px;
+    font-size: 10px; letter-spacing: 0.12em;
+    color: var(--muted); text-transform: uppercase;
+  }
+
+  .nav-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 16px;
+    cursor: pointer; transition: background 0.15s, color 0.15s;
+    color: var(--muted);
+    user-select: none;
+  }
+  .nav-item:hover { background: var(--surface); color: var(--text); }
+  .nav-item.active { color: var(--accent); background: rgba(0,229,160,0.06); }
+  .nav-item .badge {
+    margin-left: auto;
+    background: var(--border2);
+    border-radius: 3px;
+    padding: 1px 6px;
+    font-size: 10px;
+    color: var(--muted);
+  }
+
+  .project-filter {
+    padding: 0 8px;
+  }
+  .project-tag {
+    display: inline-flex; align-items: center;
+    padding: 3px 8px; margin: 2px;
+    border-radius: 3px;
+    background: var(--border);
+    color: var(--muted);
+    cursor: pointer; font-size: 11px;
+    transition: background 0.15s;
+  }
+  .project-tag:hover, .project-tag.active {
+    background: rgba(0,229,160,0.12); color: var(--accent);
+  }
+
+  /* ── Content area ── */
+  .topbar {
+    border-bottom: 1px solid var(--border);
+    padding: 14px 24px;
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--bg);
+    position: sticky; top: 52px; z-index: 50;
+  }
+
+  .search-wrap {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    border-radius: 4px;
+    padding: 5px 12px;
+    width: 320px;
+    transition: border-color 0.15s;
+  }
+  .search-wrap:focus-within { border-color: var(--accent); }
+  .search-wrap input {
+    background: transparent; border: none; outline: none;
+    color: var(--text); font-family: var(--mono); font-size: 12px;
+    flex: 1;
+  }
+  .search-wrap input::placeholder { color: var(--muted); }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 14px;
+    border-radius: 4px;
+    border: none;
+    font-family: var(--mono); font-size: 12px;
+    cursor: pointer; transition: all 0.15s;
+    font-weight: 500;
+  }
+  .btn-primary { background: var(--accent); color: #000; }
+  .btn-primary:hover { background: #00ffb3; }
+  .btn-danger  { background: transparent; color: var(--danger); border: 1px solid var(--danger); }
+  .btn-danger:hover { background: rgba(255,68,85,0.1); }
+  .btn-ghost   { background: transparent; color: var(--muted); border: 1px solid var(--border2); }
+  .btn-ghost:hover { border-color: var(--text); color: var(--text); }
+  .btn-sm { padding: 4px 9px; font-size: 11px; }
+
+  /* ── Keys table ── */
+  #keys-panel { padding: 24px; }
+
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+    margin-bottom: 24px;
+  }
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 16px;
+  }
+  .stat-card .label { font-size: 10px; letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
+  .stat-card .value { font-size: 22px; font-weight: 600; color: var(--text); margin-top: 4px; }
+  .stat-card .value.accent { color: var(--accent); }
+  .stat-card .value.warn   { color: var(--warn); }
+  .stat-card .value.danger { color: var(--danger); }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  thead th {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    font-weight: 400;
+  }
+  tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background 0.1s;
+  }
+  tbody tr:hover { background: var(--surface); }
+  tbody td { padding: 10px 12px; vertical-align: middle; }
+
+  .key-name { color: var(--accent); font-weight: 500; }
+  .tag {
+    display: inline-flex; align-items: center;
+    padding: 2px 7px;
+    border-radius: 3px;
+    background: var(--border);
+    color: var(--muted);
+    font-size: 10px; margin: 1px;
+  }
+  .tag.llm     { background: rgba(0,153,255,0.15); color: var(--accent2); }
+  .tag.game    { background: rgba(0,229,160,0.1);  color: var(--accent);  }
+  .tag.payment { background: rgba(255,170,0,0.1);   color: var(--warn); }
+
+  .expiry { font-size: 11px; }
+  .expiry.ok   { color: var(--muted); }
+  .expiry.warn { color: var(--warn); }
+  .expiry.bad  { color: var(--danger); }
+
+  .copy-btn {
+    background: transparent; border: 1px solid var(--border2);
+    color: var(--muted); border-radius: 3px;
+    padding: 3px 7px; font-family: var(--mono); font-size: 10px;
+    cursor: pointer; transition: all 0.15s;
+  }
+  .copy-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .copy-btn.copied { border-color: var(--success); color: var(--success); }
+
+  .actions-cell { display: flex; gap: 6px; align-items: center; }
+
+  /* ── Modal ── */
+  .modal-overlay {
+    display: none;
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(0,0,0,0.7);
+    align-items: center; justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    border-radius: 8px;
+    padding: 28px 32px;
+    width: 500px;
+    max-width: 96vw;
+    box-shadow: 0 24px 64px rgba(0,0,0,0.6);
+  }
+  .modal h2 { font-size: 14px; font-weight: 600; margin-bottom: 20px; color: var(--text); }
+
+  .field { margin-bottom: 14px; }
+  .field label {
+    display: block; font-size: 10px; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: 5px;
+  }
+  .field input, .field textarea {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border2);
+    border-radius: 4px;
+    color: var(--text);
+    font-family: var(--mono); font-size: 12px;
+    padding: 8px 10px;
+    outline: none; transition: border-color 0.15s;
+  }
+  .field input:focus, .field textarea:focus { border-color: var(--accent); }
+  .field textarea { resize: vertical; min-height: 60px; }
+
+  .modal-footer {
+    display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px;
+  }
+
+  /* ── Audit panel ── */
+  #audit-panel { display: none; padding: 24px; }
+  #audit-panel.active { display: block; }
+  #keys-panel.hidden { display: none; }
+
+  .audit-row {
+    display: grid;
+    grid-template-columns: 150px 100px 1fr 120px;
+    gap: 12px;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+  }
+  .audit-row .ts { color: var(--muted); }
+  .audit-action { font-weight: 500; }
+  .audit-action.READ   { color: var(--accent2); }
+  .audit-action.CREATE { color: var(--accent); }
+  .audit-action.UPDATE { color: var(--warn); }
+  .audit-action.DELETE { color: var(--danger); }
+
+  /* ── Toast ── */
+  #toast-container {
+    position: fixed; bottom: 24px; right: 24px;
+    display: flex; flex-direction: column; gap: 8px;
+    z-index: 300;
+  }
+  .toast {
+    background: var(--surface);
+    border: 1px solid var(--border2);
+    border-radius: 4px;
+    padding: 10px 16px;
+    font-size: 12px;
+    animation: slideIn 0.2s ease;
+    border-left: 3px solid var(--accent);
+  }
+  .toast.err { border-left-color: var(--danger); }
+  @keyframes slideIn {
+    from { transform: translateX(20px); opacity: 0; }
+    to   { transform: translateX(0);    opacity: 1; }
+  }
+
+  .empty-state {
+    text-align: center;
+    color: var(--muted);
+    padding: 60px 20px;
+  }
+  .empty-state .icon { font-size: 32px; margin-bottom: 12px; }
+  .empty-state p { font-size: 13px; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <header>
+    <div class="logo">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/>
+        <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+      </svg>
+      DEVVAULT
+    </div>
+    <div class="header-right">
+      <div class="token-input-wrap">
+        <label>TOKEN</label>
+        <input type="password" id="token-input" placeholder="paste admin token…" autocomplete="off" />
+      </div>
+      <div class="status-dot" id="status-dot"></div>
+    </div>
+  </header>
+
+  <main>
+    <aside>
+      <div class="nav-section">
+        <div class="nav-label">Views</div>
+        <div class="nav-item active" data-view="keys" onclick="switchView('keys',this)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
+          Keys
+          <span class="badge" id="keys-count">0</span>
+        </div>
+        <div class="nav-item" data-view="audit" onclick="switchView('audit',this)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+          Audit Log
+        </div>
+      </div>
+      <div class="nav-section">
+        <div class="nav-label">Projects</div>
+        <div class="project-filter" id="project-filter">
+          <span class="project-tag active" data-project="" onclick="filterProject('',this)">all</span>
+        </div>
+      </div>
+    </aside>
+
+    <div style="display:flex;flex-direction:column;min-height:0;">
+      <div class="topbar">
+        <div class="search-wrap">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
+          <input type="text" id="search-input" placeholder="search keys, tags, projects…" oninput="handleSearch()" />
+        </div>
+        <button class="btn btn-primary" onclick="openCreateModal()">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          New Key
+        </button>
+      </div>
+
+      <div id="keys-panel">
+        <div class="stats-row" id="stats-row">
+          <div class="stat-card"><div class="label">Total Keys</div><div class="value accent" id="stat-total">—</div></div>
+          <div class="stat-card"><div class="label">Projects</div><div class="value" id="stat-projects">—</div></div>
+          <div class="stat-card"><div class="label">Expiring Soon</div><div class="value warn" id="stat-expiring">—</div></div>
+          <div class="stat-card"><div class="label">Total Accesses</div><div class="value" id="stat-accesses">—</div></div>
+        </div>
+
+        <table id="keys-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Project</th>
+              <th>Tags</th>
+              <th>Accesses</th>
+              <th>Last Used</th>
+              <th>Expires</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="keys-tbody"></tbody>
+        </table>
+        <div id="keys-empty" class="empty-state" style="display:none;">
+          <div class="icon">🔐</div>
+          <p>No keys yet. Add your first one.</p>
+        </div>
+      </div>
+
+      <div id="audit-panel">
+        <div id="audit-log-rows"></div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- Modal -->
+<div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+  <div class="modal" onclick="event.stopPropagation()">
+    <h2 id="modal-title">Register Key</h2>
+    <div class="field">
+      <label>Name <span style="color:var(--muted);font-size:9px">(unique identifier)</span></label>
+      <input type="text" id="f-name" placeholder="GITHUB_TOKEN" />
+    </div>
+    <div class="field">
+      <label>Value</label>
+      <input type="password" id="f-value" placeholder="ghp_…" autocomplete="off" />
+    </div>
+    <div class="field" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div>
+        <label>Project</label>
+        <input type="text" id="f-project" placeholder="shattered" />
+      </div>
+      <div>
+        <label>Tags <span style="color:var(--muted);font-size:9px">(space-separated)</span></label>
+        <input type="text" id="f-tags" placeholder="llm groq project:aethoria" />
+      </div>
+    </div>
+    <div class="field">
+      <label>Expires At <span style="color:var(--muted);font-size:9px">(optional, YYYY-MM-DD)</span></label>
+      <input type="date" id="f-expires" />
+    </div>
+    <div class="field">
+      <label>Notes</label>
+      <textarea id="f-notes" placeholder="Free tier — 10k req/day, resets monthly"></textarea>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitKey()" id="modal-submit-btn">Save Key</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toast container -->
+<div id="toast-container"></div>
+
+<script>
+  // ── State ──────────────────────────────────────────────────────────────────
+  let allKeys = [];
+  let filteredKeys = [];
+  let currentProject = '';
+  let editingId = null;
+  const BASE = '';
+
+  // ── Token helpers ──────────────────────────────────────────────────────────
+  const tokenEl = document.getElementById('token-input');
+  const dotEl   = document.getElementById('status-dot');
+
+  function getToken() { return tokenEl.value.trim(); }
+
+  function headers(extra = {}) {
+    return { 'Content-Type': 'application/json', 'Authorization': `Bearer ${getToken()}`, ...extra };
+  }
+
+  async function checkHealth() {
+    try {
+      const r = await fetch('/api/health');
+      dotEl.className = 'status-dot ' + (r.ok ? 'ok' : 'err');
+    } catch { dotEl.className = 'status-dot err'; }
+  }
+
+  // ── Toast ──────────────────────────────────────────────────────────────────
+  function toast(msg, err = false) {
+    const el = document.createElement('div');
+    el.className = 'toast' + (err ? ' err' : '');
+    el.textContent = msg;
+    document.getElementById('toast-container').appendChild(el);
+    setTimeout(() => el.remove(), 3200);
+  }
+
+  // ── View switching ─────────────────────────────────────────────────────────
+  function switchView(view, el) {
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    el.classList.add('active');
+    document.getElementById('keys-panel').classList.toggle('hidden', view !== 'keys');
+    document.getElementById('audit-panel').classList.toggle('active', view === 'audit');
+    if (view === 'audit') loadAudit();
+  }
+
+  // ── Keys ───────────────────────────────────────────────────────────────────
+  async function loadKeys() {
+    try {
+      const r = await fetch('/api/keys', { headers: headers() });
+      if (!r.ok) { toast('Auth failed — check token', true); return; }
+      allKeys = await r.json();
+      renderStats();
+      renderProjects();
+      applyFilters();
+    } catch (e) { toast('Failed to load keys', true); }
+  }
+
+  function renderStats() {
+    const active = allKeys.filter(k => k.is_active);
+    const projects = new Set(active.map(k => k.project).filter(Boolean)).size;
+    const soon = active.filter(k => {
+      if (!k.expires_at) return false;
+      const d = new Date(k.expires_at) - Date.now();
+      return d < 7 * 86400000 && d > 0;
+    }).length;
+    const accesses = active.reduce((s, k) => s + (k.access_count || 0), 0);
+    document.getElementById('stat-total').textContent    = active.length;
+    document.getElementById('stat-projects').textContent = projects;
+    document.getElementById('stat-expiring').textContent = soon;
+    document.getElementById('stat-accesses').textContent = accesses;
+    document.getElementById('keys-count').textContent    = active.length;
+  }
+
+  function renderProjects() {
+    const projects = [...new Set(allKeys.map(k => k.project).filter(Boolean))].sort();
+    const wrap = document.getElementById('project-filter');
+    wrap.innerHTML = `<span class="project-tag ${currentProject===''?'active':''}" data-project="" onclick="filterProject('',this)">all</span>`;
+    projects.forEach(p => {
+      const s = document.createElement('span');
+      s.className = 'project-tag' + (currentProject === p ? ' active' : '');
+      s.textContent = p;
+      s.onclick = () => filterProject(p, s);
+      wrap.appendChild(s);
+    });
+  }
+
+  function filterProject(project, el) {
+    currentProject = project;
+    document.querySelectorAll('.project-tag').forEach(t => t.classList.remove('active'));
+    el.classList.add('active');
+    applyFilters();
+  }
+
+  function handleSearch() { applyFilters(); }
+
+  function applyFilters() {
+    const q = document.getElementById('search-input').value.toLowerCase();
+    filteredKeys = allKeys.filter(k => {
+      if (!k.is_active) return false;
+      if (currentProject && k.project !== currentProject) return false;
+      if (q) {
+        return k.name.toLowerCase().includes(q)
+          || (k.tags || '').toLowerCase().includes(q)
+          || (k.project || '').toLowerCase().includes(q)
+          || (k.notes || '').toLowerCase().includes(q);
+      }
+      return true;
+    });
+    renderTable();
+  }
+
+  function renderTable() {
+    const tbody = document.getElementById('keys-tbody');
+    const empty = document.getElementById('keys-empty');
+    if (!filteredKeys.length) {
+      tbody.innerHTML = '';
+      empty.style.display = 'block';
+      return;
+    }
+    empty.style.display = 'none';
+
+    tbody.innerHTML = filteredKeys.map(k => {
+      const tags = (k.tags || '').split(/\s+/).filter(Boolean).map(t => {
+        const cls = t.startsWith('llm') ? 'llm' : t.startsWith('pay') ? 'payment' : t.startsWith('game') || t.startsWith('project:') ? 'game' : '';
+        return `<span class="tag ${cls}">${t}</span>`;
+      }).join('');
+
+      let expiryHtml = '<span class="expiry ok">—</span>';
+      if (k.expires_at) {
+        const diff = new Date(k.expires_at) - Date.now();
+        const days = Math.ceil(diff / 86400000);
+        const cls = days < 0 ? 'bad' : days < 7 ? 'warn' : 'ok';
+        const label = days < 0 ? `expired ${-days}d ago` : `${days}d`;
+        expiryHtml = `<span class="expiry ${cls}" title="${k.expires_at}">${label}</span>`;
+      }
+
+      const lastUsed = k.last_accessed
+        ? new Date(k.last_accessed).toLocaleDateString()
+        : '<span style="color:var(--muted)">never</span>';
+
+      return `<tr>
+        <td><span class="key-name">${escHtml(k.name)}</span></td>
+        <td><span style="color:var(--muted)">${escHtml(k.project||'—')}</span></td>
+        <td>${tags || '<span style="color:var(--muted)">—</span>'}</td>
+        <td style="color:var(--muted);text-align:center">${k.access_count}</td>
+        <td>${lastUsed}</td>
+        <td>${expiryHtml}</td>
+        <td>
+          <div class="actions-cell">
+            <button class="copy-btn" onclick="copyKey('${escHtml(k.name)}',this)" title="Copy value">copy</button>
+            <button class="btn btn-ghost btn-sm" onclick="openEditModal(${k.id})">edit</button>
+            <button class="btn btn-danger btn-sm" onclick="deleteKey(${k.id},'${escHtml(k.name)}')">del</button>
+          </div>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  async function copyKey(name, btn) {
+    try {
+      const r = await fetch(`/api/keys/${encodeURIComponent(name)}`, { headers: headers() });
+      if (!r.ok) { toast('Failed to fetch key', true); return; }
+      const data = await r.json();
+      await navigator.clipboard.writeText(data.value);
+      btn.textContent = 'copied!';
+      btn.classList.add('copied');
+      setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1800);
+    } catch { toast('Copy failed', true); }
+  }
+
+  // ── Modal ──────────────────────────────────────────────────────────────────
+  function openCreateModal() {
+    editingId = null;
+    document.getElementById('modal-title').textContent = 'Register Key';
+    document.getElementById('modal-submit-btn').textContent = 'Save Key';
+    ['f-name','f-value','f-project','f-tags','f-expires','f-notes'].forEach(id => {
+      document.getElementById(id).value = '';
+    });
+    document.getElementById('f-name').disabled = false;
+    document.getElementById('modal-overlay').classList.add('open');
+    document.getElementById('f-name').focus();
+  }
+
+  function openEditModal(id) {
+    const key = allKeys.find(k => k.id === id);
+    if (!key) return;
+    editingId = id;
+    document.getElementById('modal-title').textContent = 'Edit Key';
+    document.getElementById('modal-submit-btn').textContent = 'Update Key';
+    document.getElementById('f-name').value    = key.name;
+    document.getElementById('f-name').disabled = true;
+    document.getElementById('f-value').value   = '';
+    document.getElementById('f-project').value = key.project || '';
+    document.getElementById('f-tags').value    = key.tags || '';
+    document.getElementById('f-expires').value = key.expires_at ? key.expires_at.slice(0,10) : '';
+    document.getElementById('f-notes').value   = key.notes || '';
+    document.getElementById('modal-overlay').classList.add('open');
+    document.getElementById('f-value').focus();
+  }
+
+  function closeModal(e) {
+    if (e && e.target !== document.getElementById('modal-overlay')) return;
+    document.getElementById('modal-overlay').classList.remove('open');
+  }
+
+  async function submitKey() {
+    const name     = document.getElementById('f-name').value.trim();
+    const value    = document.getElementById('f-value').value;
+    const project  = document.getElementById('f-project').value.trim();
+    const tags     = document.getElementById('f-tags').value.trim();
+    const expires  = document.getElementById('f-expires').value || null;
+    const notes    = document.getElementById('f-notes').value.trim();
+
+    if (!editingId && (!name || !value)) { toast('Name and value are required', true); return; }
+
+    const btn = document.getElementById('modal-submit-btn');
+    btn.disabled = true; btn.textContent = 'saving…';
+
+    try {
+      let r;
+      if (editingId) {
+        r = await fetch(`/api/keys/${encodeURIComponent(name)}`, {
+          method: 'PUT',
+          headers: headers(),
+          body: JSON.stringify({ value: value||undefined, project, tags, notes, expires_at: expires }),
+        });
+      } else {
+        r = await fetch('/api/keys', {
+          method: 'POST',
+          headers: headers(),
+          body: JSON.stringify({ name, value, project, tags, notes, expires_at: expires }),
+        });
+      }
+      const data = await r.json();
+      if (!r.ok) { toast(data.error || 'Error saving key', true); return; }
+      toast(editingId ? `Updated ${name}` : `Registered ${name}`);
+      document.getElementById('modal-overlay').classList.remove('open');
+      loadKeys();
+    } catch { toast('Network error', true); }
+    finally { btn.disabled = false; btn.textContent = editingId ? 'Update Key' : 'Save Key'; }
+  }
+
+  async function deleteKey(id, name) {
+    if (!confirm(`Delete "${name}"? This is a soft-delete and will be audited.`)) return;
+    try {
+      const r = await fetch(`/api/keys/${encodeURIComponent(name)}`, {
+        method: 'DELETE', headers: headers()
+      });
+      if (!r.ok) { toast('Delete failed', true); return; }
+      toast(`Deleted ${name}`);
+      loadKeys();
+    } catch { toast('Network error', true); }
+  }
+
+  // ── Audit ──────────────────────────────────────────────────────────────────
+  async function loadAudit() {
+    try {
+      const r = await fetch('/api/audit?limit=100', { headers: headers() });
+      if (!r.ok) return;
+      const rows = await r.json();
+      const wrap = document.getElementById('audit-log-rows');
+      if (!rows.length) { wrap.innerHTML = '<div class="empty-state"><p>No audit entries yet.</p></div>'; return; }
+      wrap.innerHTML = rows.map(row => `
+        <div class="audit-row">
+          <span class="ts">${new Date(row.timestamp).toLocaleString()}</span>
+          <span class="audit-action ${row.action}">${row.action}</span>
+          <span style="color:var(--text)">${escHtml(row.key_name)}</span>
+          <span style="color:var(--muted)">${escHtml(row.ip)}</span>
+        </div>
+      `).join('');
+    } catch {}
+  }
+
+  // ── Utilities ──────────────────────────────────────────────────────────────
+  function escHtml(s) {
+    return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+  }
+
+  // ── Init ───────────────────────────────────────────────────────────────────
+  tokenEl.addEventListener('change', loadKeys);
+  tokenEl.addEventListener('keydown', e => { if (e.key === 'Enter') loadKeys(); });
+  checkHealth();
+  setInterval(checkHealth, 30000);
+
+  // Load if token is pre-filled (e.g. browser autofill)
+  if (tokenEl.value) loadKeys();
+</script>
+</body>
+</html>
