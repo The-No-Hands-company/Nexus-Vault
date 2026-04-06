@@ -96,7 +96,10 @@
     grid-row: 1 / 3;
     border-right: 1px solid var(--border);
     padding: 20px 0;
+    display: flex;
+    flex-direction: column;
   }
+  @keyframes nxpulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
 
   .nav-section { margin-bottom: 24px; }
   .nav-label {
@@ -388,6 +391,16 @@
         <div class="nav-label">Projects</div>
         <div class="project-filter" id="project-filter">
           <span class="project-tag active" data-project="" onclick="filterProject('',this)">all</span>
+        </div>
+      </div>
+      <div class="nav-section" style="margin-top:auto;padding-top:16px;border-top:1px solid var(--border)">
+        <div class="nav-label">Nexus Network</div>
+        <div id="nx-widget" style="font-size:11px;color:var(--muted)">
+          <div style="display:flex;align-items:center;gap:5px;margin-bottom:7px">
+            <span id="nx-dot" style="width:5px;height:5px;border-radius:50%;background:var(--muted);display:inline-block;flex-shrink:0"></span>
+            <span id="nx-status">connecting…</span>
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 8px;line-height:1.6" id="nx-stats"></div>
         </div>
       </div>
     </aside>
@@ -763,6 +776,50 @@
 
   // Load if token is pre-filled (e.g. browser autofill)
   if (tokenEl.value) loadKeys();
+</script>
+<script>
+(function () {
+  const NETWORK_API = 'https://network.nexus.computer/api/stats'
+  const dot = document.getElementById('nx-dot')
+  const status = document.getElementById('nx-status')
+  const statsEl = document.getElementById('nx-stats')
+
+  function fmt(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M'
+    if (n >= 1000) return (n / 1000).toFixed(1) + 'K'
+    return n.toLocaleString()
+  }
+  function fmtRam(gb) {
+    return gb >= 1024 ? (gb / 1024).toFixed(1) + ' TB' : Math.round(gb) + ' GB'
+  }
+
+  function load() {
+    fetch(NETWORK_API)
+      .then(r => r.json())
+      .then(s => {
+        dot.style.background = '#1D9E75'
+        dot.style.animation = 'nxpulse 2s infinite'
+        status.textContent = 'live'
+        status.style.color = '#1D9E75'
+        statsEl.innerHTML = [
+          ['Nodes', fmt(s.nodes_online), '#1D9E75'],
+          ['RAM', fmtRam(s.total_ram_gb), 'var(--text)'],
+          ['Cores', fmt(s.total_cpu_cores), 'var(--text)'],
+          ['Countries', s.countries, 'var(--text)'],
+        ].map(([label, val, color]) =>
+          `<span style="color:var(--muted)">${label}</span><span style="color:${color};font-weight:500">${val}</span>`
+        ).join('')
+      })
+      .catch(() => {
+        dot.style.background = 'var(--muted)'
+        status.textContent = 'unreachable'
+        status.style.color = 'var(--muted)'
+      })
+  }
+
+  load()
+  setInterval(load, 30_000)
+})()
 </script>
 </body>
 </html>
