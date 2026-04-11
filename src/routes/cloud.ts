@@ -23,7 +23,7 @@ export type NexusCloudVaultRegistration = {
   appId: string;
   nodeId: string;
   endpoint: string;
-  tokenHint: string | null;
+  capabilityHint: string[];
   registry: string;
   client: string;
 };
@@ -34,12 +34,8 @@ export type NexusCloudVaultClient = {
   auth: string;
   endpoints: {
     keys: string;
-    entries: string;
-    entryByName: string;
     audit: string;
-    collections: string;
     cloud: string;
-    secrets: string;
   };
 };
 
@@ -48,12 +44,12 @@ const router = Router();
 const app: NexusCloudVaultApp = {
   id: 'nexus-vault',
   name: 'Nexus Vault',
-  role: 'vault-layer',
+  role: 'secrets-layer',
   embedded: false,
   referenced: true,
   exposes: ['/.well-known/nexus-cloud', '/api/cloud/discovery', '/api/cloud/register', '/api/cloud/client'],
-  consumes: ['/api/keys', '/api/keys/types/:type', '/api/collections', '/api/audit', '/api/health'],
-  requiredApis: ['systems-api.v1', 'topology.v1'],
+  consumes: ['/api/keys', '/api/audit'],
+  requiredApis: ['topology.v1', 'systems-api.v1'],
 };
 
 export function buildVaultCloudDiscovery(): NexusCloudVaultDiscovery {
@@ -65,13 +61,18 @@ export function buildVaultCloudDiscovery(): NexusCloudVaultDiscovery {
   };
 }
 
-export function buildVaultCloudRegistration(input: { appId: string; nodeId: string; endpoint: string; token?: string }): NexusCloudVaultRegistration {
+export function buildVaultCloudRegistration(input: {
+  appId: string;
+  nodeId: string;
+  endpoint: string;
+  capabilities?: readonly string[];
+}): NexusCloudVaultRegistration {
   return {
     registered: true,
     appId: input.appId,
     nodeId: input.nodeId,
     endpoint: input.endpoint,
-    tokenHint: input.token ? `${input.token.slice(0, 4)}...` : null,
+    capabilityHint: Array.isArray(input.capabilities) ? [...input.capabilities] : [],
     registry: '/api/cloud/discovery',
     client: '/api/cloud/client',
   };
@@ -84,13 +85,9 @@ export function buildVaultCloudClient(): { client: NexusCloudVaultClient } {
       baseUrl: '/api',
       auth: 'Bearer VAULT_ACCESS_TOKEN',
       endpoints: {
-        keys: '/api/keys/:name',
-        entries: '/api/keys',
-        entryByName: '/api/keys/:name',
+        keys: '/api/keys',
         audit: '/api/audit',
-        collections: '/api/collections',
         cloud: '/api/cloud/discovery',
-        secrets: '/api/keys/:name',
       },
     },
   };
@@ -105,12 +102,17 @@ router.get('/api/cloud/discovery', (_req, res) => {
 });
 
 router.post('/api/cloud/register', (req: Request, res: Response) => {
-  const { appId, nodeId, endpoint, token } = (req.body ?? {}) as { appId?: string; nodeId?: string; endpoint?: string; token?: string };
+  const { appId, nodeId, endpoint, capabilities } = (req.body ?? {}) as {
+    appId?: string;
+    nodeId?: string;
+    endpoint?: string;
+    capabilities?: readonly string[];
+  };
   if (!appId || !nodeId || !endpoint) {
     res.status(400).json({ error: 'Missing required fields: appId, nodeId, endpoint' });
     return;
   }
-  res.status(201).json(buildVaultCloudRegistration({ appId, nodeId, endpoint, token }));
+  res.status(201).json(buildVaultCloudRegistration({ appId, nodeId, endpoint, capabilities }));
 });
 
 router.get('/api/cloud/client', (_req, res) => {
