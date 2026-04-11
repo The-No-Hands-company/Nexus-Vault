@@ -1,91 +1,72 @@
-# 🔐 DevVault
+# Nexus Vault
 
-Self-hosted API key registry. One place to store, rotate, and audit all your API keys across all projects.
+Nexus Vault is the canonical sovereign secrets system for the Nexus ecosystem.
 
-## Features
+It combines the former API-key registry and devvault-style secret storage into one unified vault for:
+- `api-key`
+- `password`
+- `note`
+- `recovery-code`
+- `token`
+- `card`
+- general `secret`
 
-- **AES-256-GCM encryption** — every value encrypted at rest with a per-value IV
-- **REST pull endpoint** — `GET /api/keys/:name` from any project in any language
-- **Tag + project system** — organize keys across all your repos
-- **Expiry tracking** — dashboard warns when keys are near expiry
-- **Full audit log** — every read, create, update, and delete is logged with IP
-- **Usage stats** — see which keys are being hit and how often
-- **Docker-first** — single `docker compose up` to run
+## Core features
 
----
+- AES-256-GCM encrypted storage
+- collections / folder-like nesting
+- tags and categories
+- import/export contracts
+- audit logging and access stats
+- read-only runtime secret pulls
+- admin CRUD for vault items and collections
+- cloud discovery and registration endpoints for Nexus Cloud
 
-## Quick Start (Docker)
+## Cloud contract
 
-```bash
-# 1. Copy and fill in your secrets
-cp .env.example .env
-# Edit docker-compose.yml — change the three VAULT_* values
+Nexus Vault exposes the canonical Nexus Cloud surface:
 
-# 2. Start
-docker compose up -d
+- `/.well-known/nexus-cloud`
+- `/api/cloud/discovery`
+- `/api/cloud/register`
+- `/api/cloud/client`
 
-# 3. Open dashboard
-open http://localhost:3900
-```
+The cloud client contract includes both legacy API-key style access and the broader vault entry model.
 
-## Quick Start (Local dev)
+## API surface
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/keys` | List vault entries |
+| GET | `/api/keys/:name` | Read a single entry |
+| GET | `/api/keys/search` | Search entries |
+| GET | `/api/keys/expiring` | List expiring entries |
+| GET | `/api/keys/types/:type` | List entries by type |
+| GET | `/api/collections` | List collections |
+| POST | `/api/collections` | Create collection |
+| PUT | `/api/collections/:name` | Update collection |
+| DELETE | `/api/collections/:name` | Archive collection |
+| GET | `/api/categories` | List supported categories |
+| POST | `/api/import` | Import a vault payload |
+| GET | `/api/export` | Export the vault |
+| GET | `/api/audit` | Recent audit log |
+| GET | `/api/audit/stats` | Access stats |
+| GET | `/.well-known/nexus-cloud` | Cloud discovery |
+| GET | `/api/cloud/discovery` | Cloud discovery payload |
+| POST | `/api/cloud/register` | Cloud registration |
+| GET | `/api/cloud/client` | Cloud client contract |
+
+## Security notes
+
+- `VAULT_MASTER_SECRET` is required.
+- `VAULT_ACCESS_TOKEN` is the read token.
+- `VAULT_ADMIN_TOKEN` is the admin token.
+- Keep the vault data directory backed up separately.
+
+## Development
 
 ```bash
 npm install
-cp .env.example .env    # fill in values
-npm run dev             # tsx watch — hot reload
+npm run dev
+npm run build
 ```
-
----
-
-## API
-
-All endpoints require `Authorization: Bearer <token>` header.
-
-| Method | Path | Auth | Description |
-|--------|------|------|-------------|
-| GET | `/api/keys` | read or admin | List all keys (values redacted) |
-| GET | `/api/keys/:name` | read or admin | **Get decrypted value** |
-| GET | `/api/keys/search?q=` | read or admin | Search by name/tag/project |
-| GET | `/api/keys/expiring?days=7` | admin | Keys expiring within N days |
-| POST | `/api/keys` | admin | Create a key |
-| PUT | `/api/keys/:name` | admin | Update a key |
-| DELETE | `/api/keys/:name` | admin | Soft-delete a key |
-| GET | `/api/audit` | admin | Recent audit log |
-| GET | `/api/audit/stats` | admin | Access stats per key |
-
-### Pulling a key from a project
-
-```bash
-# curl
-curl -s http://localhost:3900/api/keys/GITHUB_TOKEN \
-  -H "Authorization: Bearer $VAULT_ACCESS_TOKEN" | jq -r .value
-
-# Node.js
-const res = await fetch('http://localhost:3900/api/keys/GITHUB_TOKEN', {
-  headers: { Authorization: `Bearer ${process.env.VAULT_ACCESS_TOKEN}` }
-});
-const { value } = await res.json();
-
-# Python
-import requests, os
-r = requests.get('http://localhost:3900/api/keys/GITHUB_TOKEN',
-    headers={'Authorization': f'Bearer {os.environ["VAULT_ACCESS_TOKEN"]}'})
-value = r.json()['value']
-```
-
----
-
-## Security Notes
-
-- `VAULT_MASTER_SECRET` is the root of all encryption. Back it up. Losing it = losing all stored values.
-- `VAULT_ACCESS_TOKEN` (read-only) and `VAULT_ADMIN_TOKEN` (full admin) are separate. Give projects the read token only.
-- All tokens are compared in constant time to prevent timing attacks.
-- The vault data dir (`./data/vault.db`) should be excluded from git and backed up separately.
-- When moving to hosted infra, enable CORS_ORIGIN and put the service behind a reverse proxy with TLS.
-
----
-
-## Migrating to PostgreSQL
-
-The DB layer is isolated in `src/db.ts`. When ready to swap to Postgres, replace `better-sqlite3` with `pg` or Prisma and update query syntax. The crypto and routes layers don't change.

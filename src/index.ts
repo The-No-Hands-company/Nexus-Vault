@@ -5,10 +5,10 @@ import rateLimit from 'express-rate-limit';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import { keysRouter } from './routes/keys.js';
+import { vaultRouter } from './routes/keys.js';
 import { auditRouter } from './routes/audit.js';
+import cloudRouter from './routes/cloud.js';
 
-// Validate required env vars
 const required = ['VAULT_ACCESS_TOKEN', 'VAULT_ADMIN_TOKEN', 'VAULT_MASTER_SECRET'];
 for (const v of required) {
   if (!process.env[v]) {
@@ -20,18 +20,16 @@ for (const v of required) {
 const PORT = parseInt(process.env.PORT ?? '3900', 10);
 const app = express();
 
-// ── Security ─────────────────────────────────────────────────────────────────
-
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],   // dashboard inline scripts
+      scriptSrc: ["'self'", "'unsafe-inline'"],
       styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
       fontSrc: ["'self'", 'https://fonts.gstatic.com'],
       imgSrc: ["'self'", 'data:'],
-    }
-  }
+    },
+  },
 }));
 
 app.use(cors({
@@ -40,7 +38,6 @@ app.use(cors({
   allowedHeaders: ['Authorization', 'Content-Type'],
 }));
 
-// Global rate limit — tighten in production
 app.use(rateLimit({
   windowMs: 60_000,
   max: 120,
@@ -49,7 +46,6 @@ app.use(rateLimit({
   message: { error: 'Too many requests' },
 }));
 
-// Stricter limit for write operations
 const writeLimit = rateLimit({
   windowMs: 60_000,
   max: 30,
@@ -58,26 +54,20 @@ const writeLimit = rateLimit({
 
 app.use(express.json({ limit: '64kb' }));
 
-// ── Static dashboard ──────────────────────────────────────────────────────────
-
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// ── API routes ────────────────────────────────────────────────────────────────
-
-app.use('/api/keys', writeLimit, keysRouter);
+app.use('/api/keys', writeLimit, vaultRouter);
 app.use('/api/audit', auditRouter);
+app.use('/', cloudRouter);
 
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', ts: new Date().toISOString() });
 });
 
-// SPA fallback — serve dashboard for any unmatched route
 app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
-
-// ── Error handler ─────────────────────────────────────────────────────────────
 
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error('[vault]', err.message);
@@ -85,7 +75,7 @@ app.use((err: Error, _req: express.Request, res: express.Response, _next: expres
 });
 
 app.listen(PORT, () => {
-  console.log(`\n🔐 DevVault running on http://localhost:${PORT}\n`);
+  console.log(`\n🔐 Nexus Vault running on http://localhost:${PORT}\n`);
 });
 
 export default app;
