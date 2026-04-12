@@ -21,9 +21,11 @@
     --success:  #00e5a0;
     --mono:     'IBM Plex Mono', monospace;
     --sans:     'IBM Plex Sans', sans-serif;
+    color-scheme: dark;
   }
 
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { -webkit-text-size-adjust: 100%; }
 
   body {
     background: var(--bg);
@@ -32,6 +34,13 @@
     font-size: 13px;
     line-height: 1.6;
     min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  button, [role="button"] {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
   }
 
   /* ── Layout ── */

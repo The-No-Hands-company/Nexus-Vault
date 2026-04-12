@@ -14,6 +14,60 @@ export const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+db.exec(`
+CREATE TABLE IF NOT EXISTS vault_collections (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT NOT NULL DEFAULT '',
+  parent_id INTEGER,
+  icon TEXT NOT NULL DEFAULT '',
+  color TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  is_active INTEGER NOT NULL DEFAULT 1,
+  FOREIGN KEY(parent_id) REFERENCES vault_collections(id)
+);
+
+CREATE TABLE IF NOT EXISTS vault_entries (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL,
+  category TEXT NOT NULL,
+  name TEXT NOT NULL UNIQUE,
+  value_enc TEXT NOT NULL,
+  tags TEXT NOT NULL DEFAULT '[]',
+  collection_id INTEGER,
+  project TEXT NOT NULL DEFAULT '',
+  notes TEXT NOT NULL DEFAULT '',
+  metadata TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT,
+  last_accessed TEXT,
+  access_count INTEGER NOT NULL DEFAULT 0,
+  is_active INTEGER NOT NULL DEFAULT 1,
+  FOREIGN KEY(collection_id) REFERENCES vault_collections(id)
+);
+
+CREATE TABLE IF NOT EXISTS vault_import_exports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  kind TEXT NOT NULL,
+  format TEXT NOT NULL,
+  filename TEXT NOT NULL,
+  metadata TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_name TEXT NOT NULL,
+  action TEXT NOT NULL,
+  ip TEXT NOT NULL,
+  user_agent TEXT NOT NULL,
+  meta TEXT NOT NULL,
+  timestamp TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+
 export const VAULT_ENTRY_TYPES = ['api-key', 'password', 'note', 'recovery-code', 'token', 'card', 'secret'] as const;
 export type VaultEntryType = (typeof VAULT_ENTRY_TYPES)[number];
 

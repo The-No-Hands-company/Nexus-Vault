@@ -21,6 +21,7 @@ const PORT = parseInt(process.env.PORT ?? '3900', 10);
 const app = express();
 
 app.use(helmet({
+  frameguard: false,
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
@@ -28,6 +29,7 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
       fontSrc: ["'self'", 'https://fonts.gstatic.com'],
       imgSrc: ["'self'", 'data:'],
+      frameAncestors: ["*"],
     },
   },
 }));
