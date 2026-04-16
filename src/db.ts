@@ -491,6 +491,12 @@ export const collectionQueries = {
 
 export const entryQueries = {
   getAll: db.prepare<[], VaultEntry>(`SELECT * FROM vault_entries WHERE is_active = 1 ORDER BY type, category, project, name`),
+  countByType: db.prepare<[], { type: string; count: number }>(
+    `SELECT type, COUNT(*) as count FROM vault_entries WHERE is_active = 1 GROUP BY type ORDER BY count DESC`
+  ),
+  countByCategory: db.prepare<[], { category: string; count: number }>(
+    `SELECT category, COUNT(*) as count FROM vault_entries WHERE is_active = 1 GROUP BY category ORDER BY count DESC`
+  ),
   getPage: db.prepare<[number, number], VaultEntry>(`SELECT * FROM vault_entries WHERE is_active = 1 ORDER BY type, category, project, name LIMIT ? OFFSET ?`),
   getCount: db.prepare<[], { count: number }>(`SELECT COUNT(*) as count FROM vault_entries WHERE is_active = 1`),
   getByName: db.prepare<[string], VaultEntry>(`SELECT * FROM vault_entries WHERE name = ? AND is_active = 1`),

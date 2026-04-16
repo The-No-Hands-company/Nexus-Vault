@@ -14,10 +14,19 @@ function clientIp(req: Request): string {
     ?? 'unknown';
 }
 
-function safeEntry(row: ReturnType<typeof entryQueries.getAll.all>[number]) {
-  const { value_enc: _v, ...rest } = row;
+function buildCollectionMap(): Map<number, string> {
+  const all = collectionQueries.getAll.all();
+  return new Map(all.map((c) => [c.id, c.name]));
+}
+
+function safeEntry(row: ReturnType<typeof entryQueries.getAll.all>[number], collectionMap?: ReadonlyMap<number, string>) {
+  const { value_enc: _v, collection_id, ...rest } = row;
+  const collection = collection_id !== null
+    ? (collectionMap?.get(collection_id) ?? collectionQueries.getById.get(collection_id)?.name ?? null)
+    : null;
   return {
     ...rest,
+    collection,
     tags: parseTags(rest.tags),
     metadata: parseMetadata(rest.metadata),
   };
@@ -37,11 +46,12 @@ vaultRouter.get('/', requireReadToken, (req, res) => {
   const page = isNaN(rawPage) || rawPage < 1 ? 1 : rawPage;
   const limit = isNaN(rawLimit) || rawLimit < 1 ? 100 : Math.min(rawLimit, 500);
   const offset = (page - 1) * limit;
+  const collectionMap = buildCollectionMap();
   if (req.query.page === undefined && req.query.limit === undefined) {
-    return res.json(entryQueries.getAll.all().map(safeEntry));
+    return res.json(entryQueries.getAll.all().map((e) => safeEntry(e, collectionMap)));
   }
   const total = entryQueries.getCount.get()!.count;
-  const entries = entryQueries.getPage.all(limit, offset).map(safeEntry);
+  const entries = entryQueries.getPage.all(limit, offset).map((e) => safeEntry(e, collectionMap));
   res.json({ entries, total, page, limit, pages: Math.ceil(total / limit) });
 });
 
@@ -71,12 +81,12 @@ vaultRouter.get('/categories', requireReadToken, (_req, res) => {
 
 vaultRouter.get('/types/:type', requireReadToken, (req, res) => {
   const type = normalizeVaultEntryType(req.params.type);
-  res.json(entryQueries.getByType.all(type).map(safeEntry));
+  res.json(entryQueries.getByType.all(type).map((e) => safeEntry(e, buildCollectionMap())));
 });
 
 vaultRouter.get('/categories/:category', requireReadToken, (req, res) => {
   const category = req.params.category as VaultCategory;
-  res.json(entryQueries.getByCategory.all(category).map(safeEntry));
+  res.json(entryQueries.getByCategory.all(category).map((e) => safeEntry(e, buildCollectionMap())));
 });
 
 vaultRouter.get('/collections', requireReadToken, (_req, res) => {
@@ -92,7 +102,8 @@ vaultRouter.get('/collections/:name', requireReadToken, (req, res) => {
 vaultRouter.get('/collections/:name/entries', requireReadToken, (req, res) => {
   const collection = collectionQueries.getByName.get(req.params.name);
   if (!collection) return res.status(404).json({ error: 'Collection not found' });
-  res.json(entryQueries.getByCollection.all(collection.id).map(safeEntry));
+  const entries = entryQueries.getByCollection.all(collection.id);
+  res.json(entries.map((e) => safeEntry(e, new Map([[collection.id, collection.name]]))));
 });
 
 vaultRouter.post('/collections', requireAdminToken, (req, res) => {
@@ -153,17 +164,33 @@ vaultRouter.delete('/collections/:name', requireAdminToken, (req, res) => {
   res.json({ ok: true });
 });
 
+vaultRouter.get('/stats', requireReadToken, (_req, res) => {
+  const total = entryQueries.getCount.get()!.count;
+  const byType = entryQueries.countByType.all();
+  const byCategory = entryQueries.countByCategory.all();
+  const in7days = new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
+  const in30days = new Date(Date.now() + 30 * 86_400_000).toISOString().slice(0, 10);
+  const expiringSoon7 = entryQueries.getExpiringSoon.all(in7days).length;
+  const expiringSoon30 = entryQueries.getExpiringSoon.all(in30days).length;
+  res.json({
+    total,
+    byType,
+    byCategory,
+    expiringSoon: { days7: expiringSoon7, days30: expiringSoon30 },
+  });
+});
+
 vaultRouter.get('/expiring', requireAdminToken, (req, res) => {
   const days = parseInt(req.query.days as string ?? '7', 10);
   const cutoff = new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
   const rows = entryQueries.getExpiringSoon.all(cutoff);
-  res.json(rows.map(safeEntry));
+  res.json(rows.map((e) => safeEntry(e, buildCollectionMap())));
 });
 
 vaultRouter.get('/search', requireReadToken, (req, res) => {
   const q = `%${req.query.q ?? ''}%`;
   const rows = entryQueries.search.all(q, q, q, q);
-  res.json(rows.map(safeEntry));
+  res.json(rows.map((e) => safeEntry(e, buildCollectionMap())));
 });
 
 vaultRouter.get('/import/export', requireAdminToken, (_req, res) => {
@@ -218,6 +245,51 @@ vaultRouter.get('/:name/versions/:version', requireAdminToken, (req, res) => {
   res.json({ ...version, value_enc: undefined, value });
 });
 
+vaultRouter.post('/:name/restore/:version', requireAdminToken, (req, res) => {
+  const row = entryQueries.getByName.get(req.params.name);
+  if (!row) return res.status(404).json({ error: `Entry "${req.params.name}" not found` });
+  const ver = parseInt(req.params.version, 10);
+  if (isNaN(ver) || ver < 1) return res.status(400).json({ error: 'Invalid version number' });
+  const archived = versionQueries.getByVersion.get(row.name, ver);
+  if (!archived) return res.status(404).json({ error: `Version ${ver} not found` });
+  let decrypted: string;
+  try {
+    decrypted = decrypt(archived.value_enc, MASTER);
+  } catch {
+    return res.status(500).json({ error: 'Failed to decrypt archived version' });
+  }
+  // Archive the current value before overwriting
+  const currentVersion = versionQueries.countByName.get(row.name)?.count ?? 0;
+  versionQueries.insert.run({
+    entry_name: row.name,
+    version: currentVersion + 1,
+    type: row.type,
+    category: row.category,
+    value_enc: row.value_enc,
+    tags: row.tags,
+    notes: row.notes,
+    metadata: row.metadata,
+    expires_at: row.expires_at,
+    archived_reason: 'restore',
+  });
+  // Re-encrypt with current master (handles key rotation scenarios)
+  const newValueEnc = encrypt(decrypted, MASTER);
+  entryQueries.update.run({
+    id: row.id,
+    type: archived.type,
+    category: archived.category,
+    value_enc: newValueEnc,
+    tags: archived.tags,
+    notes: archived.notes,
+    metadata: archived.metadata,
+    expires_at: archived.expires_at,
+    collection_id: row.collection_id,
+    project: row.project,
+  });
+  logAudit(row.name, 'RESTORE', clientIp(req), req.headers['user-agent'] ?? '', JSON.stringify({ restoredVersion: ver }));
+  res.json({ ok: true, name: row.name, restoredVersion: ver });
+});
+
 vaultRouter.get('/:name', requireReadToken, (req, res) => {
   const row = entryQueries.getByName.get(req.params.name);
   if (!row) return res.status(404).json({ error: `Entry "${req.params.name}" not found` });
@@ -240,7 +312,7 @@ vaultRouter.get('/:name', requireReadToken, (req, res) => {
     category: row.category,
     value,
     tags: parseTags(row.tags),
-    collection: row.collection_id,
+    collection: row.collection_id ? collectionQueries.getById.get(row.collection_id)?.name ?? null : null,
     project: row.project,
     notes: row.notes,
     metadata: parseMetadata(row.metadata),
@@ -338,6 +410,19 @@ vaultRouter.delete('/:name', requireAdminToken, (req, res) => {
   if (nameErr) return sendValidationError(res, [nameErr]);
   const row = entryQueries.getByName.get(req.params.name);
   if (!row) return res.status(404).json({ error: 'Entry not found' });
+  const currentVersion = versionQueries.countByName.get(row.name)?.count ?? 0;
+  versionQueries.insert.run({
+    entry_name: row.name,
+    version: currentVersion + 1,
+    type: row.type,
+    category: row.category,
+    value_enc: row.value_enc,
+    tags: row.tags,
+    notes: row.notes,
+    metadata: row.metadata,
+    expires_at: row.expires_at,
+    archived_reason: 'delete',
+  });
   entryQueries.softDelete.run(row.id);
   logAudit(row.name, 'DELETE', clientIp(req), req.headers['user-agent'] ?? '');
   res.json({ ok: true });

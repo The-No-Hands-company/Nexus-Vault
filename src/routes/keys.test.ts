@@ -186,6 +186,16 @@ function createDbMockModule() {
       getByCollection: { all: (collection_id: number) => entries.filter((e) => e.collection_id === collection_id && e.is_active === 1) },
       getExpiringSoon: { all: (_cutoff: string) => [] as Entry[] },
       search: { all: (_q1: string, _q2: string, _q3: string, _q4: string) => [] as Entry[] },
+      countByType: { all: () => entries.filter((e) => e.is_active === 1).reduce<{ type: string; count: number }[]>((acc, e) => {
+        const existing = acc.find((x) => x.type === e.type);
+        if (existing) { existing.count++; } else { acc.push({ type: e.type, count: 1 }); }
+        return acc;
+      }, []) },
+      countByCategory: { all: () => entries.filter((e) => e.is_active === 1).reduce<{ category: string; count: number }[]>((acc, e) => {
+        const existing = acc.find((x) => x.category === e.category);
+        if (existing) { existing.count++; } else { acc.push({ category: e.category, count: 1 }); }
+        return acc;
+      }, []) },
       upsert: {
         run: (payload: {
           type: VaultEntryType;
@@ -772,6 +782,196 @@ describe.sequential('vaultRouter production hardening', () => {
       expect(noParams.status).toBe(200);
       expect(Array.isArray(noParams.payload)).toBe(true);
       expect((noParams.payload as unknown[]).length).toBe(5);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+describe.sequential('vaultRouter version history and restore', () => {
+  it('archives a version on DELETE with reason=delete', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'to-delete',
+        value: 'delete-me',
+        type: 'secret',
+      });
+
+      const del = await request('DELETE', '/api/keys/to-delete', 'admin-token-1234567890abcdef');
+      expect(del.status).toBe(200);
+      expect(del.payload).toMatchObject({ ok: true });
+
+      // Entry should be gone
+      const gone = await request('GET', '/api/keys/to-delete', 'read-token-1234567890abcdef');
+      expect(gone.status).toBe(404);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('GET /stats returns total, byType, byCategory, expiringSoon', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'stat-key-1',
+        value: 'v1',
+        type: 'token',
+      });
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'stat-key-2',
+        value: 'v2',
+        type: 'secret',
+      });
+
+      const stats = await request('GET', '/api/keys/stats', 'read-token-1234567890abcdef');
+      expect(stats.status).toBe(200);
+      const body = stats.payload as { total: number; byType: Array<{ type: string; count: number }>; byCategory: unknown[]; expiringSoon: { days7: number; days30: number } };
+      expect(body.total).toBe(2);
+      expect(Array.isArray(body.byType)).toBe(true);
+      expect(Array.isArray(body.byCategory)).toBe(true);
+      expect(body.expiringSoon).toMatchObject({ days7: 0, days30: 0 });
+
+      // Reject read from unauthenticated
+      const unauth = await request('GET', '/api/keys/stats', 'wrong-token');
+      expect(unauth.status).toBe(401);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('POST /:name/restore/:version restores archived value and archives current', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'restorable',
+        value: 'v0-original',
+        type: 'secret',
+      });
+      // Create 2 versions by updating twice
+      await request('PUT', '/api/keys/restorable', 'admin-token-1234567890abcdef', { value: 'v1-updated' });
+      await request('PUT', '/api/keys/restorable', 'admin-token-1234567890abcdef', { value: 'v2-updated' });
+
+      // Current value should be v2-updated
+      const current = await request('GET', '/api/keys/restorable', 'read-token-1234567890abcdef');
+      expect(current.payload).toMatchObject({ value: 'v2-updated' });
+
+      // Restore version 1 (v0-original)
+      const restore = await request('POST', '/api/keys/restorable/restore/1', 'admin-token-1234567890abcdef');
+      expect(restore.status).toBe(200);
+      expect(restore.payload).toMatchObject({ ok: true, name: 'restorable', restoredVersion: 1 });
+
+      // Current value should now be v0-original
+      const afterRestore = await request('GET', '/api/keys/restorable', 'read-token-1234567890abcdef');
+      expect(afterRestore.payload).toMatchObject({ value: 'v0-original' });
+
+      // Version list should now have 3 entries (v1 + v2 + the 'restore' snapshot of v2)
+      const versions = await request('GET', '/api/keys/restorable/versions', 'admin-token-1234567890abcdef');
+      expect(versions.status).toBe(200);
+      expect((versions.payload as unknown[]).length).toBe(3);
+
+      // Non-existent version returns 404
+      const notFound = await request('POST', '/api/keys/restorable/restore/99', 'admin-token-1234567890abcdef');
+      expect(notFound.status).toBe(404);
+
+      // Read token cannot restore (admin required)
+      const forbidden = await request('POST', '/api/keys/restorable/restore/1', 'read-token-1234567890abcdef');
+      expect(forbidden.status).toBe(401);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+describe.sequential('vaultRouter version history and restore', () => {
+  it('archives a version on DELETE with reason=delete', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'to-delete',
+        value: 'delete-me',
+        type: 'secret',
+      });
+
+      const del = await request('DELETE', '/api/keys/to-delete', 'admin-token-1234567890abcdef');
+      expect(del.status).toBe(200);
+      expect(del.payload).toMatchObject({ ok: true });
+
+      // Entry should be gone
+      const gone = await request('GET', '/api/keys/to-delete', 'read-token-1234567890abcdef');
+      expect(gone.status).toBe(404);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('GET /stats returns total, byType, byCategory, expiringSoon', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'stat-key-1',
+        value: 'v1',
+        type: 'token',
+      });
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'stat-key-2',
+        value: 'v2',
+        type: 'secret',
+      });
+
+      const stats = await request('GET', '/api/keys/stats', 'read-token-1234567890abcdef');
+      expect(stats.status).toBe(200);
+      const body = stats.payload as { total: number; byType: Array<{ type: string; count: number }>; byCategory: unknown[]; expiringSoon: { days7: number; days30: number } };
+      expect(body.total).toBe(2);
+      expect(Array.isArray(body.byType)).toBe(true);
+      expect(Array.isArray(body.byCategory)).toBe(true);
+      expect(body.expiringSoon).toMatchObject({ days7: 0, days30: 0 });
+
+      // Reject read from unauthenticated
+      const unauth = await request('GET', '/api/keys/stats', 'wrong-token');
+      expect(unauth.status).toBe(401);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('POST /:name/restore/:version restores archived value and archives current', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'restorable',
+        value: 'v0-original',
+        type: 'secret',
+      });
+      // Create 2 versions by updating twice
+      await request('PUT', '/api/keys/restorable', 'admin-token-1234567890abcdef', { value: 'v1-updated' });
+      await request('PUT', '/api/keys/restorable', 'admin-token-1234567890abcdef', { value: 'v2-updated' });
+
+      // Current value should be v2-updated
+      const current = await request('GET', '/api/keys/restorable', 'read-token-1234567890abcdef');
+      expect(current.payload).toMatchObject({ value: 'v2-updated' });
+
+      // Restore version 1 (v0-original)
+      const restore = await request('POST', '/api/keys/restorable/restore/1', 'admin-token-1234567890abcdef');
+      expect(restore.status).toBe(200);
+      expect(restore.payload).toMatchObject({ ok: true, name: 'restorable', restoredVersion: 1 });
+
+      // Current value should now be v0-original
+      const afterRestore = await request('GET', '/api/keys/restorable', 'read-token-1234567890abcdef');
+      expect(afterRestore.payload).toMatchObject({ value: 'v0-original' });
+
+      // Version list should now have 3 entries (v1 + v2 + the 'restore' snapshot of v2)
+      const versions = await request('GET', '/api/keys/restorable/versions', 'admin-token-1234567890abcdef');
+      expect(versions.status).toBe(200);
+      expect((versions.payload as unknown[]).length).toBe(3);
+
+      // Non-existent version returns 404
+      const notFound = await request('POST', '/api/keys/restorable/restore/99', 'admin-token-1234567890abcdef');
+      expect(notFound.status).toBe(404);
+
+      // Read token cannot restore (admin required)
+      const forbidden = await request('POST', '/api/keys/restorable/restore/1', 'read-token-1234567890abcdef');
+      expect(forbidden.status).toBe(401);
     } finally {
       await cleanup();
     }

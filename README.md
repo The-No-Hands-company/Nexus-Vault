@@ -21,6 +21,7 @@ It combines the former API-key registry and devvault-style secret storage into o
 - audit logging and access stats
 - read-only runtime secret pulls
 - admin CRUD for vault items and collections
+- full version history for every entry (archived on update, delete, and restore)
 - cloud discovery and registration endpoints for Nexus Cloud
 
 ## Cloud contract
@@ -38,16 +39,23 @@ The cloud client contract includes both legacy API-key style access and the broa
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/keys` | List vault entries |
+| GET | `/api/keys` | List vault entries (add `?page=N&limit=N` for pagination) |
+| GET | `/api/keys/stats` | Aggregate stats: total, byType, byCategory, expiringSoon |
 | GET | `/api/keys/:name` | Read a single entry |
 | GET | `/api/keys/search` | Search entries |
 | GET | `/api/keys/expiring` | List expiring entries |
 | GET | `/api/keys/types/:type` | List entries by type |
+| GET | `/api/keys/categories/:category` | List entries by category |
 | GET | `/api/keys/categories` | List supported categories |
 | GET | `/api/keys/collections` | List collections |
+| GET | `/api/keys/collections/:name` | Get a single collection |
+| GET | `/api/keys/collections/:name/entries` | List entries in a collection |
 | POST | `/api/keys/collections` | Create collection |
 | PUT | `/api/keys/collections/:name` | Update collection |
 | DELETE | `/api/keys/collections/:name` | Archive collection |
+| GET | `/api/keys/:name/versions` | List all archived versions of an entry (admin) |
+| GET | `/api/keys/:name/versions/:version` | Get a specific archived version with decrypted value (admin) |
+| POST | `/api/keys/:name/restore/:version` | Restore an archived version back to active (admin) |
 | GET | `/api/keys/import/export` | List recent import/export records |
 | POST | `/api/keys/import` | Import a vault payload (version 1 JSON) |
 | POST | `/api/keys/import/env` | Bulk-import from raw `.env` text |
@@ -94,7 +102,7 @@ curl -X POST http://localhost:3900/api/keys/import/env \
  -H "Authorization: Bearer $VAULT_ADMIN_TOKEN" \
  -H "Content-Type: application/json" \
  -d '{
-  "env": "GITHUB_TOKEN=ghp_xxx\nNOTION_API_KEY=secret_xxx\nOPENAI_API_KEY=sk-xxx",
+  "env": "SERVICE_USER=demo\nSERVICE_PASS=demo\nSERVICE_HOST=localhost",
   "collection": "openclaw",
   "project": "openclaw",
   "tags": ["source:env", "tool:openclaw"]
@@ -131,12 +139,12 @@ curl -X POST http://localhost:3900/api/keys/import/openclaw \
    {
     "name": "notion",
     "icon": "notion",
-    "env": ["NOTION_API_KEY"]
+    "env": ["NOTION_TOKEN"]
    }
   ],
   "values": {
-   "GITHUB_TOKEN": "ghp_xxx",
-   "NOTION_API_KEY": "secret_xxx"
+    "GITHUB_TOKEN": "example_github_token",
+    "NOTION_TOKEN": "example_notion_token"
   }
  }'
 ```
@@ -156,7 +164,7 @@ Response shape:
   },
   {
    "plugin": "notion",
-   "entries": ["NOTION_API_KEY"]
+  "entries": ["NOTION_TOKEN"]
   }
  ]
 }
