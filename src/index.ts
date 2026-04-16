@@ -12,6 +12,7 @@ import { auditRouter } from './routes/audit.js';
 import cloudRouter from './routes/cloud.js';
 import { opsRouter } from './routes/ops.js';
 import { configRouter } from './routes/config.js';
+import { getRuntimeState, isWriteBlocked } from './runtime-state.js';
 
 const required = ['VAULT_ACCESS_TOKEN', 'VAULT_ADMIN_TOKEN', 'VAULT_MASTER_SECRET'];
 for (const v of required) {
@@ -175,6 +176,27 @@ const writeLimit = rateLimit({
 
 app.use(express.json({ limit: '64kb' }));
 
+app.use((req, res, next) => {
+  const isWriteMethod = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
+  if (!isWriteMethod) return next();
+
+  // Allow maintenance toggle endpoint itself while blocked so operators can recover.
+  if (req.path === '/api/ops/maintenance') return next();
+
+  if (isWriteBlocked()) {
+    const state = getRuntimeState();
+    res.status(503).json({
+      error: 'Writes are temporarily disabled',
+      maintenanceMode: state.maintenanceMode,
+      maintenanceReason: state.maintenanceReason || null,
+      restoreInProgress: state.restoreInProgress,
+    });
+    return;
+  }
+
+  next();
+});
+
 const __dirname = path.dirname(process.argv[1] ?? '');
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -198,11 +220,13 @@ app.get('/api/health', (_req, res) => {
 });
 
 app.get('/api/ready', (_req, res) => {
-  if (!isReady || isDraining) {
+  const state = getRuntimeState();
+  if (!isReady || isDraining || state.restoreInProgress) {
     res.status(503).json({
       status: 'not-ready',
       ready: isReady,
       draining: isDraining,
+      restoreInProgress: state.restoreInProgress,
       ts: new Date().toISOString(),
     });
     return;
@@ -212,6 +236,7 @@ app.get('/api/ready', (_req, res) => {
     status: 'ready',
     ready: true,
     draining: false,
+    restoreInProgress: state.restoreInProgress,
     ts: new Date().toISOString(),
   });
 });

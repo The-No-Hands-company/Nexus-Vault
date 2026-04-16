@@ -12,8 +12,20 @@ import {
   verifySignedBackupToken,
   writeUploadedBackup,
 } from '../ops.js';
+import { getRuntimeState, setMaintenanceMode, setRestoreInProgress } from '../runtime-state.js';
 
 export const opsRouter = Router();
+
+opsRouter.get('/state', requireAdminToken, (_req, res) => {
+  res.json({ state: getRuntimeState() });
+});
+
+opsRouter.post('/maintenance', requireAdminToken, (req, res) => {
+  const enabled = req.body?.enabled === true;
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason : '';
+  const state = setMaintenanceMode(enabled, reason);
+  res.json({ ok: true, state });
+});
 
 function asPositiveInt(raw: unknown, fallback: number, max: number): number {
   const value = parseInt(String(raw ?? fallback), 10);
@@ -133,6 +145,11 @@ opsRouter.put('/backups/upload', async (req, res) => {
 });
 
 opsRouter.post('/backups/restore', requireAdminToken, (req, res) => {
+  if (getRuntimeState().restoreInProgress) {
+    res.status(409).json({ error: 'A restore operation is already in progress' });
+    return;
+  }
+
   try {
     const filename = String(req.body?.filename ?? '').trim();
     if (!filename) {
@@ -140,10 +157,23 @@ opsRouter.post('/backups/restore', requireAdminToken, (req, res) => {
       return;
     }
 
+    const expectedConfirm = `RESTORE ${filename}`;
+    const confirm = String(req.body?.confirm ?? '').trim();
+    if (confirm !== expectedConfirm) {
+      res.status(400).json({
+        error: 'restore confirmation mismatch',
+        expectedConfirm,
+      });
+      return;
+    }
+
     const verifyChecksum = req.body?.verifyChecksum !== false;
+    setRestoreInProgress(true);
     const restored = restoreBackup(filename, verifyChecksum);
     res.json({ ok: true, ...restored });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  } finally {
+    setRestoreInProgress(false);
   }
 });

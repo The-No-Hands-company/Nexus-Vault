@@ -64,12 +64,14 @@ The cloud client contract includes both legacy API-key style access and the broa
 | GET | `/api/audit/chain` | Audit chain head/status summary |
 | GET | `/api/ops/backups` | List backup inventory and retention info |
 | POST | `/api/ops/backups/create` | Create immediate DB backup and enforce retention |
+| GET | `/api/ops/state` | Get operational state (maintenance/restore flags) |
+| POST | `/api/ops/maintenance` | Toggle maintenance mode and optional reason |
 | GET | `/api/ops/backups/:filename/checksum` | Verify backup checksum integrity |
 | POST | `/api/ops/backups/sign-download` | Create signed backup download token |
 | GET | `/api/ops/backups/download?token=...` | Download backup via signed token |
 | POST | `/api/ops/backups/sign-upload` | Create signed backup upload token |
 | PUT | `/api/ops/backups/upload?token=...` | Upload backup binary via signed token |
-| POST | `/api/ops/backups/restore` | Restore DB from a backup file |
+| POST | `/api/ops/backups/restore` | Restore DB from a backup file (explicit confirmation required) |
 | GET | `/api/config/check` | Production safety preflight report (non-secret findings) |
 | GET | `/.well-known/nexus-cloud` | Cloud discovery |
 | GET | `/api/cloud/discovery` | Cloud discovery payload |
@@ -275,3 +277,9 @@ Optional flags:
 - `KEEP_TMP=1` — preserve downloaded audit/backup artifacts
 - `SMOKE_RESTORE=1` — include restore step (`POST /api/ops/backups/restore`)
 - `VAULT_SIEM_WEBHOOK_URL=...` — exercise `/api/audit/export/siem`
+
+Restore safety guardrails:
+
+- Restore requires explicit confirmation payload: `confirm: "RESTORE <filename>"`.
+- During restore, readiness reports `503` with `restoreInProgress=true`.
+- Maintenance mode can be toggled via `POST /api/ops/maintenance` and inspected via `GET /api/ops/state`.

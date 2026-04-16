@@ -32,8 +32,21 @@ if [[ -z "${staged_files}" ]]; then
   exit 0
 fi
 
-if echo "${staged_files}" | rg -n '(^|/)\.env($|\.)|vite\.config\.ts\.timestamp-.*\.mjs$' >/dev/null; then
-  echo "Blocked: .env or vite timestamp temp file detected in staged changes."
+while IFS= read -r file; do
+  base="$(basename "$file")"
+  if [[ "$base" == ".env" ]]; then
+    echo "Blocked: .env file detected in staged changes."
+    exit 1
+  fi
+
+  if [[ "$base" == .env.* && "$base" != ".env.example" ]]; then
+    echo "Blocked: sensitive env file detected in staged changes: $base"
+    exit 1
+  fi
+done <<< "${staged_files}"
+
+if echo "${staged_files}" | rg -n 'vite\.config\.ts\.timestamp-.*\.mjs$' >/dev/null; then
+  echo "Blocked: vite timestamp temp file detected in staged changes."
   exit 1
 fi
 

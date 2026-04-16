@@ -122,7 +122,7 @@ fi
 
 # 6) Optional restore dry-run (guarded by explicit flag)
 if [[ "${SMOKE_RESTORE:-0}" == "1" ]]; then
-  restore_result="$(request_json POST "$BASE_URL/api/ops/backups/restore" "{\"filename\":\"$backup_name\",\"verifyChecksum\":true}")"
+  restore_result="$(request_json POST "$BASE_URL/api/ops/backups/restore" "{\"filename\":\"$backup_name\",\"verifyChecksum\":true,\"confirm\":\"RESTORE $backup_name\"}")"
   echo "[smoke] Restore completed: $(printf '%s' "$restore_result" | json_query 'restored')"
 else
   echo "[smoke] Restore skipped (set SMOKE_RESTORE=1 to enable)"
