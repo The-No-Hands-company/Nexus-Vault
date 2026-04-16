@@ -14,6 +14,7 @@ import { opsRouter } from './routes/ops.js';
 import { configRouter } from './routes/config.js';
 import { getRuntimeState, isWriteBlocked } from './runtime-state.js';
 import { metricsRouter } from './routes/metrics.js';
+import { httpObservabilityMiddleware } from './observability.js';
 
 const required = ['VAULT_ACCESS_TOKEN', 'VAULT_ADMIN_TOKEN', 'VAULT_MASTER_SECRET'];
 for (const v of required) {
@@ -176,6 +177,7 @@ const writeLimit = rateLimit({
 });
 
 app.use(express.json({ limit: '64kb' }));
+app.use(httpObservabilityMiddleware);
 
 app.use((req, res, next) => {
   const isWriteMethod = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
@@ -248,8 +250,9 @@ app.get('*', (_req, res) => {
 });
 
 app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  console.error('[vault]', err.message);
-  res.status(500).json({ error: 'Internal server error' });
+  const requestId = String(res.locals.requestId ?? 'unknown');
+  console.error('[vault]', requestId, err.message);
+  res.status(500).json({ error: 'Internal server error', requestId });
 });
 
 // Start periodic audit verification background job

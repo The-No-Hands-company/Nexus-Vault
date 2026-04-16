@@ -212,6 +212,18 @@ Token rotation envs:
 Metrics envs:
 
 - `VAULT_METRICS_PUBLIC=true|false` — if true, `/api/metrics` does not require admin token
+- `VAULT_HTTP_METRICS_ENABLED=true|false` — enable request-level HTTP metrics collection
+- `VAULT_HTTP_METRICS_IGNORE_PATHS=/api/metrics` — comma-separated path prefixes excluded from HTTP metrics
+
+Request observability:
+
+- All responses include `X-Request-Id` (propagated from incoming header when present, otherwise generated).
+- `500` error responses include `requestId` in JSON payloads for easier incident correlation.
+- `/api/metrics` includes additional counters:
+    - `vault_http_requests_total`
+    - `vault_http_errors_total`
+    - `vault_http_request_duration_ms_sum`
+    - `vault_http_request_duration_ms_count`
 
 SIEM export envs:
 
