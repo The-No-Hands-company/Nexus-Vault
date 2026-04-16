@@ -117,6 +117,27 @@ CREATE INDEX IF NOT EXISTS idx_audit_verification_runs_ok
   ON audit_verification_runs(ok);
 `,
   },
+  {
+    id: '005_entry_versions',
+    sql: `
+CREATE TABLE IF NOT EXISTS vault_entry_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entry_name TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  type TEXT NOT NULL,
+  category TEXT NOT NULL,
+  value_enc TEXT NOT NULL,
+  tags TEXT NOT NULL DEFAULT '[]',
+  notes TEXT NOT NULL DEFAULT '',
+  metadata TEXT NOT NULL DEFAULT '{}',
+  expires_at TEXT,
+  archived_at TEXT NOT NULL DEFAULT (datetime('now')),
+  archived_reason TEXT NOT NULL DEFAULT 'update'
+);
+CREATE INDEX IF NOT EXISTS idx_vault_entry_versions_name ON vault_entry_versions(entry_name);
+CREATE INDEX IF NOT EXISTS idx_vault_entry_versions_name_version ON vault_entry_versions(entry_name, version);
+`,
+  },
 ];
 
 export function runMigrations(): string[] {
@@ -469,7 +490,9 @@ export const collectionQueries = {
 };
 
 export const entryQueries = {
-  getAll: db.prepare<[], VaultEntry>(`SELECT * FROM vault_entries ORDER BY type, category, project, name`),
+  getAll: db.prepare<[], VaultEntry>(`SELECT * FROM vault_entries WHERE is_active = 1 ORDER BY type, category, project, name`),
+  getPage: db.prepare<[number, number], VaultEntry>(`SELECT * FROM vault_entries WHERE is_active = 1 ORDER BY type, category, project, name LIMIT ? OFFSET ?`),
+  getCount: db.prepare<[], { count: number }>(`SELECT COUNT(*) as count FROM vault_entries WHERE is_active = 1`),
   getByName: db.prepare<[string], VaultEntry>(`SELECT * FROM vault_entries WHERE name = ? AND is_active = 1`),
   getById: db.prepare<[number], VaultEntry>(`SELECT * FROM vault_entries WHERE id = ? AND is_active = 1`),
   getByType: db.prepare<[VaultEntryType], VaultEntry>(`SELECT * FROM vault_entries WHERE type = ? AND is_active = 1 ORDER BY category, project, name`),
@@ -636,6 +659,49 @@ export const verificationQueries = {
   ),
   getLast: db.prepare<[], AuditVerificationRun>(
     `SELECT * FROM audit_verification_runs ORDER BY id DESC LIMIT 1`
+  ),
+};
+
+export interface VaultEntryVersion {
+  id: number;
+  entry_name: string;
+  version: number;
+  type: string;
+  category: string;
+  value_enc: string;
+  tags: string;
+  notes: string;
+  metadata: string;
+  expires_at: string | null;
+  archived_at: string;
+  archived_reason: string;
+}
+
+export const versionQueries = {
+  insert: db.prepare<{
+    entry_name: string;
+    version: number;
+    type: string;
+    category: string;
+    value_enc: string;
+    tags: string;
+    notes: string;
+    metadata: string;
+    expires_at: string | null;
+    archived_reason: string;
+  }, void>(
+    `INSERT INTO vault_entry_versions (entry_name, version, type, category, value_enc, tags, notes, metadata, expires_at, archived_reason)
+     VALUES (@entry_name, @version, @type, @category, @value_enc, @tags, @notes, @metadata, @expires_at, @archived_reason)`
+  ),
+  getByName: db.prepare<[string], Omit<VaultEntryVersion, 'value_enc'>>(
+    `SELECT id, entry_name, version, type, category, tags, notes, metadata, expires_at, archived_at, archived_reason
+     FROM vault_entry_versions WHERE entry_name = ? ORDER BY version DESC`
+  ),
+  getByVersion: db.prepare<[string, number], VaultEntryVersion>(
+    `SELECT * FROM vault_entry_versions WHERE entry_name = ? AND version = ?`
+  ),
+  countByName: db.prepare<[string], { count: number }>(
+    `SELECT COUNT(*) as count FROM vault_entry_versions WHERE entry_name = ?`
   ),
 };
 

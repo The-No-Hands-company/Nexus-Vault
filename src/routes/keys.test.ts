@@ -40,11 +40,28 @@ function createDbMockModule() {
   };
 
   const now = () => new Date().toISOString();
+  type Version = {
+    id: number;
+    entry_name: string;
+    version: number;
+    type: VaultEntryType;
+    category: VaultCategory;
+    value_enc: string;
+    tags: string;
+    notes: string;
+    metadata: string;
+    expires_at: string | null;
+    archived_at: string;
+    archived_reason: string;
+  };
+
   const collections: Collection[] = [];
   const entries: Entry[] = [];
+  const versions: Version[] = [];
   const importExports: Array<{ kind: string; format: string; filename: string; metadata: string; created_at: string }> = [];
   let collectionId = 1;
   let entryId = 1;
+  let versionId = 1;
 
   const byCollectionName = (name: string) => collections.find((c) => c.name === name && c.is_active === 1) ?? null;
   const byCollectionId = (id: number) => collections.find((c) => c.id === id && c.is_active === 1) ?? null;
@@ -160,7 +177,9 @@ function createDbMockModule() {
       },
     },
     entryQueries: {
-      getAll: { all: () => entries },
+      getAll: { all: () => entries.filter((e) => e.is_active === 1) },
+      getPage: { all: (limit: number, offset: number) => entries.filter((e) => e.is_active === 1).slice(offset, offset + limit) },
+      getCount: { get: () => ({ count: entries.filter((e) => e.is_active === 1).length }) },
       getByName: { get: (name: string) => byEntryName(name) },
       getByType: { all: (type: VaultEntryType) => entries.filter((e) => e.type === type && e.is_active === 1) },
       getByCategory: { all: (category: VaultCategory) => entries.filter((e) => e.category === category && e.is_active === 1) },
@@ -277,6 +296,51 @@ function createDbMockModule() {
       insertChained: { run: (_payload: unknown) => void 0 },
       getLastRow: { get: () => null },
     },
+    versionQueries: {
+      insert: {
+        run: (payload: {
+          entry_name: string;
+          version: number;
+          type: VaultEntryType;
+          category: VaultCategory;
+          value_enc: string;
+          tags: string;
+          notes: string;
+          metadata: string;
+          expires_at: string | null;
+          archived_reason: string;
+        }) => {
+          versions.push({
+            id: versionId++,
+            entry_name: payload.entry_name,
+            version: payload.version,
+            type: payload.type,
+            category: payload.category,
+            value_enc: payload.value_enc,
+            tags: payload.tags,
+            notes: payload.notes,
+            metadata: payload.metadata,
+            expires_at: payload.expires_at,
+            archived_at: now(),
+            archived_reason: payload.archived_reason,
+          });
+        },
+      },
+      getByName: {
+        all: (name: string) =>
+          versions
+            .filter((v) => v.entry_name === name)
+            .map(({ value_enc: _v, ...rest }) => rest)
+            .sort((a, b) => b.version - a.version),
+      },
+      getByVersion: {
+        get: (name: string, version: number) =>
+          versions.find((v) => v.entry_name === name && v.version === version) ?? null,
+      },
+      countByName: {
+        get: (name: string) => ({ count: versions.filter((v) => v.entry_name === name).length }),
+      },
+    },
     logAudit: (_entry_name: string, _action: string, _ip = 'unknown', _user_agent = '', _meta = '') => void 0,
     parseMetadata,
     parseTags,
@@ -304,9 +368,9 @@ async function setupTestApp() {
 
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-vault-test-'));
   process.env.VAULT_DATA_DIR = dataDir;
-  process.env.VAULT_ACCESS_TOKEN = 'read-token-1234567890abcdef';
-  process.env.VAULT_ADMIN_TOKEN = 'admin-token-1234567890abcdef';
-  process.env.VAULT_MASTER_SECRET = 'test-master-secret';
+  process.env.VAULT_ACCESS_TOKEN = 'read-token-1234567890abcdef'; // pragma: allowlist secret
+  process.env.VAULT_ADMIN_TOKEN = 'admin-token-1234567890abcdef'; // pragma: allowlist secret
+  process.env.VAULT_MASTER_SECRET = 'test-master-secret'; // pragma: allowlist secret
 
   const express = (await import('express')).default;
   const { vaultRouter } = await import('./keys.js');
@@ -374,7 +438,7 @@ describe.sequential('vaultRouter import contracts', () => {
       const env = [
         '# a comment should be ignored',
         'export GITHUB_TOKEN=ghp_abc123',
-        'OPENAI_API_KEY="sk-live=value#not-a-comment"',
+        'OPENAI_API_KEY="sk-live=value#not-a-comment"', // pragma: allowlist secret
         'ELEVENLABS_API_KEY=el_123 # trailing comment should be removed',
         'INVALID-KEY=oops',
         'NO_EQUALS_LINE',
@@ -621,6 +685,93 @@ describe.sequential('vaultRouter validation regressions', () => {
         const res = await request('POST', '/api/keys/import/openclaw', 'admin-token-1234567890abcdef', testCase.body);
         expectValidationFailure(res, testCase.field);
       }
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+describe.sequential('vaultRouter production hardening', () => {
+  it('returns 410 Gone for expired entries', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      const pastDate = new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
+      const created = await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'expired-key',
+        value: 'old-secret',
+        type: 'api-key',
+        expires_at: pastDate,
+      });
+      expect(created.status).toBe(201);
+
+      const res = await request('GET', '/api/keys/expired-key', 'read-token-1234567890abcdef');
+      expect(res.status).toBe(410);
+      expect(res.payload).toMatchObject({ error: 'Entry has expired', expiredAt: pastDate });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('archives previous value as version on PUT update', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'versioned-key',
+        value: 'original-value',
+        type: 'secret',
+      });
+
+      await request('PUT', '/api/keys/versioned-key', 'admin-token-1234567890abcdef', { value: 'updated-value' });
+      await request('PUT', '/api/keys/versioned-key', 'admin-token-1234567890abcdef', { value: 'updated-value-2' });
+
+      const versionsRes = await request('GET', '/api/keys/versioned-key/versions', 'admin-token-1234567890abcdef');
+      expect(versionsRes.status).toBe(200);
+      const versionList = versionsRes.payload as Array<{ version: number; entry_name: string }>;
+      expect(versionList.length).toBe(2);
+      expect(versionList[0]!.version).toBe(2);
+      expect(versionList[1]!.version).toBe(1);
+
+      const v1Res = await request('GET', '/api/keys/versioned-key/versions/1', 'admin-token-1234567890abcdef');
+      expect(v1Res.status).toBe(200);
+      expect(v1Res.payload).toMatchObject({ version: 1, value: 'original-value' });
+
+      const v404 = await request('GET', '/api/keys/versioned-key/versions/99', 'admin-token-1234567890abcdef');
+      expect(v404.status).toBe(404);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('paginates GET /api/keys when page/limit query params are provided', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      for (let i = 1; i <= 5; i++) {
+        await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+          name: `pagination-key-${i}`,
+          value: `value-${i}`,
+          type: 'secret',
+        });
+      }
+
+      const page1 = await request('GET', '/api/keys?page=1&limit=3', 'read-token-1234567890abcdef');
+      expect(page1.status).toBe(200);
+      const page1Body = page1.payload as { entries: unknown[]; total: number; page: number; limit: number; pages: number };
+      expect(page1Body.entries.length).toBe(3);
+      expect(page1Body.total).toBe(5);
+      expect(page1Body.page).toBe(1);
+      expect(page1Body.limit).toBe(3);
+      expect(page1Body.pages).toBe(2);
+
+      const page2 = await request('GET', '/api/keys?page=2&limit=3', 'read-token-1234567890abcdef');
+      expect(page2.status).toBe(200);
+      const page2Body = page2.payload as { entries: unknown[]; total: number; page: number };
+      expect(page2Body.entries.length).toBe(2);
+      expect(page2Body.page).toBe(2);
+
+      const noParams = await request('GET', '/api/keys', 'read-token-1234567890abcdef');
+      expect(noParams.status).toBe(200);
+      expect(Array.isArray(noParams.payload)).toBe(true);
+      expect((noParams.payload as unknown[]).length).toBe(5);
     } finally {
       await cleanup();
     }

@@ -1,5 +1,5 @@
 import { Router, type Request, type Response } from 'express';
-import { collectionQueries, entryQueries, exportQueries, logAudit, parseMetadata, parseTags, serializeMetadata, serializeTags, normalizeVaultCategory, normalizeVaultEntryType, type VaultEntryType, type VaultCategory } from '../db.js';
+import { collectionQueries, entryQueries, exportQueries, versionQueries, logAudit, parseMetadata, parseTags, serializeMetadata, serializeTags, normalizeVaultCategory, normalizeVaultEntryType, type VaultEntryType, type VaultCategory } from '../db.js';
 import { encrypt, decrypt } from '../crypto.js';
 import { requireReadToken, requireAdminToken } from '../auth.js';
 import { validateCreateEntry, validateUpdateEntry, validateCreateCollection, validateImportDocument, validateImportEnv, validateImportOpenClaw, validateCollectionName, validateEntryName, sendValidationError } from '../validate.js';
@@ -31,8 +31,18 @@ function readBody(req: Request): Record<string, unknown> {
   return (req.body ?? {}) as Record<string, unknown>;
 }
 
-vaultRouter.get('/', requireReadToken, (_req, res) => {
-  res.json(entryQueries.getAll.all().map(safeEntry));
+vaultRouter.get('/', requireReadToken, (req, res) => {
+  const rawPage = parseInt(String(req.query.page ?? '1'), 10);
+  const rawLimit = parseInt(String(req.query.limit ?? '100'), 10);
+  const page = isNaN(rawPage) || rawPage < 1 ? 1 : rawPage;
+  const limit = isNaN(rawLimit) || rawLimit < 1 ? 100 : Math.min(rawLimit, 500);
+  const offset = (page - 1) * limit;
+  if (req.query.page === undefined && req.query.limit === undefined) {
+    return res.json(entryQueries.getAll.all().map(safeEntry));
+  }
+  const total = entryQueries.getCount.get()!.count;
+  const entries = entryQueries.getPage.all(limit, offset).map(safeEntry);
+  res.json({ entries, total, page, limit, pages: Math.ceil(total / limit) });
 });
 
 vaultRouter.get('/types', requireReadToken, (_req, res) => {
@@ -185,9 +195,36 @@ vaultRouter.get('/export', requireAdminToken, (_req, res) => {
   res.json(document);
 });
 
+vaultRouter.get('/:name/versions', requireAdminToken, (req, res) => {
+  const row = entryQueries.getByName.get(req.params.name);
+  if (!row) return res.status(404).json({ error: `Entry "${req.params.name}" not found` });
+  const versions = versionQueries.getByName.all(row.name);
+  res.json(versions);
+});
+
+vaultRouter.get('/:name/versions/:version', requireAdminToken, (req, res) => {
+  const row = entryQueries.getByName.get(req.params.name);
+  if (!row) return res.status(404).json({ error: `Entry "${req.params.name}" not found` });
+  const ver = parseInt(req.params.version, 10);
+  if (isNaN(ver) || ver < 1) return res.status(400).json({ error: 'Invalid version number' });
+  const version = versionQueries.getByVersion.get(row.name, ver);
+  if (!version) return res.status(404).json({ error: `Version ${ver} not found` });
+  let value: string;
+  try {
+    value = decrypt(version.value_enc, MASTER);
+  } catch {
+    return res.status(500).json({ error: 'Failed to decrypt archived version' });
+  }
+  res.json({ ...version, value_enc: undefined, value });
+});
+
 vaultRouter.get('/:name', requireReadToken, (req, res) => {
   const row = entryQueries.getByName.get(req.params.name);
   if (!row) return res.status(404).json({ error: `Entry "${req.params.name}" not found` });
+  if (row.expires_at && new Date(row.expires_at) < new Date()) {
+    logAudit(row.name, 'READ_EXPIRED', clientIp(req), req.headers['user-agent'] ?? '');
+    return res.status(410).json({ error: 'Entry has expired', expiredAt: row.expires_at });
+  }
   let value: string;
   try {
     value = decrypt(row.value_enc, MASTER);
@@ -267,6 +304,19 @@ vaultRouter.put('/:name', requireAdminToken, (req, res) => {
     return res.status(400).json({ error: `Collection "${collectionName}" not found` });
   }
   const value_enc = v.value ? encrypt(v.value, MASTER) : row.value_enc;
+  const currentVersion = versionQueries.countByName.get(row.name)?.count ?? 0;
+  versionQueries.insert.run({
+    entry_name: row.name,
+    version: currentVersion + 1,
+    type: row.type,
+    category: row.category,
+    value_enc: row.value_enc,
+    tags: row.tags,
+    notes: row.notes,
+    metadata: row.metadata,
+    expires_at: row.expires_at,
+    archived_reason: 'update',
+  });
   entryQueries.update.run({
     id: row.id,
     type,
