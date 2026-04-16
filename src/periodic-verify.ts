@@ -5,6 +5,7 @@ import {
   verifyAuditChain,
 } from './db.js';
 import { sendAuditFailureEmail } from './mail.js';
+import { incCounter } from './metrics.js';
 
 export interface VerificationResult {
   timestamp: string;
@@ -34,6 +35,10 @@ async function sendAlert(result: VerificationResult): Promise<boolean> {
   const now = Date.now();
   if (now - lastAlertTime < alertThrottle * 60 * 1000) {
     console.warn('[vault:periodic] Alert throttled (last alert within throttle window)');
+    incCounter('vault_alerts_total', 'Total alert attempts and outcomes', 1, {
+      channel: 'throttle',
+      result: 'throttled',
+    });
     return false;
   }
 
@@ -67,13 +72,25 @@ async function sendAlert(result: VerificationResult): Promise<boolean> {
       });
       if (!response.ok) {
         console.error(`[vault:periodic] Webhook alert failed: ${response.status} ${response.statusText}`);
+        incCounter('vault_alerts_total', 'Total alert attempts and outcomes', 1, {
+          channel: 'webhook',
+          result: 'failed',
+        });
       } else {
         console.log('[vault:periodic] Webhook alert sent successfully');
+        incCounter('vault_alerts_total', 'Total alert attempts and outcomes', 1, {
+          channel: 'webhook',
+          result: 'sent',
+        });
         anyAlertSent = true;
         lastAlertTime = now;
       }
     } catch (err) {
       console.error('[vault:periodic] Webhook alert error:', err instanceof Error ? err.message : String(err));
+      incCounter('vault_alerts_total', 'Total alert attempts and outcomes', 1, {
+        channel: 'webhook',
+        result: 'error',
+      });
     }
   }
 
@@ -91,8 +108,17 @@ async function sendAlert(result: VerificationResult): Promise<boolean> {
     ].join('\n');
     const sent = await sendAuditFailureEmail(alertEmail, subject, text);
     if (sent) {
+      incCounter('vault_alerts_total', 'Total alert attempts and outcomes', 1, {
+        channel: 'email',
+        result: 'sent',
+      });
       anyAlertSent = true;
       lastAlertTime = now;
+    } else {
+      incCounter('vault_alerts_total', 'Total alert attempts and outcomes', 1, {
+        channel: 'email',
+        result: 'failed',
+      });
     }
   }
 
@@ -124,8 +150,16 @@ export async function performVerification(options: VerificationOptions = {}): Pr
   // Log result
   if (result.ok) {
     console.log(`[vault:periodic] ✓ Verification passed: ${result.details}`);
+    incCounter('vault_audit_verify_runs_total', 'Total audit verification runs', 1, {
+      source,
+      result: 'ok',
+    });
   } else {
     console.error(`[vault:periodic] ✗ Verification failed: ${result.details}`);
+    incCounter('vault_audit_verify_runs_total', 'Total audit verification runs', 1, {
+      source,
+      result: 'failed',
+    });
     if (sendAlertsOnFailure) {
       alertSent = await sendAlert(result);
     }

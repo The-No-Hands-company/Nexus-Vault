@@ -4,6 +4,22 @@ import type { Server } from 'http';
 async function setupOpsTestApp() {
   vi.resetModules();
 
+  vi.doMock('../db.js', () => ({
+    logAudit: vi.fn(),
+  }));
+
+  vi.doMock('../metrics.js', () => ({
+    incCounter: vi.fn(),
+  }));
+
+  vi.doMock('../db.js', () => ({
+    logAudit: vi.fn(),
+  }));
+
+  vi.doMock('../metrics.js', () => ({
+    incCounter: vi.fn(),
+  }));
+
   vi.doMock('../ops.js', () => ({
     backupDirPath: () => './backups',
     databasePath: () => './data/vault.db',
@@ -193,6 +209,56 @@ describe.sequential('opsRouter operational APIs', () => {
           maintenanceReason: 'planned upgrade',
         },
       });
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('rotates tokens atomically and old admin token stops working', async () => {
+    const { request, cleanup } = await setupOpsTestApp();
+    try {
+      const rotate = await request(
+        'POST',
+        '/api/ops/tokens/rotate',
+        'admin-token-1234567890abcdef',
+        {
+          mode: 'replace',
+          adminTokens: ['new-admin-token-1234567890abcdef'],
+        }
+      );
+      expect(rotate.status).toBe(200);
+      expect(rotate.payload).toMatchObject({ ok: true, adminCount: 1 });
+
+      const oldTokenState = await request('GET', '/api/ops/state', 'admin-token-1234567890abcdef');
+      expect(oldTokenState.status).toBe(401);
+
+      const newTokenState = await request('GET', '/api/ops/state', 'new-admin-token-1234567890abcdef');
+      expect(newTokenState.status).toBe(200);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('rotates tokens atomically and old admin token stops working', async () => {
+    const { request, cleanup } = await setupOpsTestApp();
+    try {
+      const rotate = await request(
+        'POST',
+        '/api/ops/tokens/rotate',
+        'admin-token-1234567890abcdef',
+        {
+          mode: 'replace',
+          adminTokens: ['new-admin-token-1234567890abcdef'],
+        }
+      );
+      expect(rotate.status).toBe(200);
+      expect(rotate.payload).toMatchObject({ ok: true, adminCount: 1 });
+
+      const oldTokenState = await request('GET', '/api/ops/state', 'admin-token-1234567890abcdef');
+      expect(oldTokenState.status).toBe(401);
+
+      const newTokenState = await request('GET', '/api/ops/state', 'new-admin-token-1234567890abcdef');
+      expect(newTokenState.status).toBe(200);
     } finally {
       await cleanup();
     }

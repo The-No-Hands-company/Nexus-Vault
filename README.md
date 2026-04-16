@@ -66,12 +66,15 @@ The cloud client contract includes both legacy API-key style access and the broa
 | POST | `/api/ops/backups/create` | Create immediate DB backup and enforce retention |
 | GET | `/api/ops/state` | Get operational state (maintenance/restore flags) |
 | POST | `/api/ops/maintenance` | Toggle maintenance mode and optional reason |
+| GET | `/api/ops/tokens/state` | Get token state summary (counts + updatedAt) |
+| POST | `/api/ops/tokens/rotate` | Atomic token rotation with audit trail |
 | GET | `/api/ops/backups/:filename/checksum` | Verify backup checksum integrity |
 | POST | `/api/ops/backups/sign-download` | Create signed backup download token |
 | GET | `/api/ops/backups/download?token=...` | Download backup via signed token |
 | POST | `/api/ops/backups/sign-upload` | Create signed backup upload token |
 | PUT | `/api/ops/backups/upload?token=...` | Upload backup binary via signed token |
 | POST | `/api/ops/backups/restore` | Restore DB from a backup file (explicit confirmation required) |
+| GET | `/api/metrics` | Structured metrics (`prometheus` text or `otel` JSON) |
 | GET | `/api/config/check` | Production safety preflight report (non-secret findings) |
 | GET | `/.well-known/nexus-cloud` | Cloud discovery |
 | GET | `/api/cloud/discovery` | Cloud discovery payload |
@@ -199,6 +202,16 @@ Backup operations envs:
 - `VAULT_BACKUP_RETENTION_COUNT=20` — keep newest backups and prune older files
 - `VAULT_BACKUP_MAX_UPLOAD_MB=50` — maximum signed upload payload size
 - `VAULT_BACKUP_SIGNING_SECRET=<secret>` — HMAC secret for signed backup upload/download tokens (falls back to admin token if unset)
+- `VAULT_BACKUP_KMS_MASTER_KEY=<secret|hex|base64>` — envelope-wrapping key for `kms-envelope` backup encryption mode
+
+Token rotation envs:
+
+- `VAULT_MIN_TOKEN_LENGTH=24` — rotation enforces this minimum unless weak tokens are allowed
+- `VAULT_ALLOW_WEAK_TOKENS=true|false` — development override only
+
+Metrics envs:
+
+- `VAULT_METRICS_PUBLIC=true|false` — if true, `/api/metrics` does not require admin token
 
 SIEM export envs:
 
@@ -281,5 +294,11 @@ Optional flags:
 Restore safety guardrails:
 
 - Restore requires explicit confirmation payload: `confirm: "RESTORE <filename>"`.
+- Restore accepts optional `passphrase` for encrypted passphrase backups.
 - During restore, readiness reports `503` with `restoreInProgress=true`.
 - Maintenance mode can be toggled via `POST /api/ops/maintenance` and inspected via `GET /api/ops/state`.
+
+Token rotation safety:
+
+- Rotate via `POST /api/ops/tokens/rotate` with `mode` (`replace` or `append`) and `accessTokens` / `adminTokens` arrays.
+- Rotation is atomic in-memory cutover and emits audit event `TOKEN_ROTATE`.

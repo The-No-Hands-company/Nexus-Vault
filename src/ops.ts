@@ -16,6 +16,29 @@ export type BackupRecord = {
   bytes: number;
   createdAt: string;
   sha256: string | null;
+  encrypted: boolean;
+  encryptionMode: 'none' | 'passphrase' | 'kms-envelope';
+};
+
+type BackupEncryptionMeta = {
+  version: 1;
+  algorithm: 'aes-256-gcm';
+  mode: 'passphrase' | 'kms-envelope';
+  iv: string;
+  tag: string;
+  salt?: string;
+  wrappedKey?: string;
+  wrapIv?: string;
+  wrapTag?: string;
+};
+
+export type BackupEncryptionInput = {
+  mode: 'passphrase' | 'kms-envelope';
+  passphrase?: string;
+};
+
+export type CreateBackupOptions = {
+  encryption?: BackupEncryptionInput;
 };
 
 function timestampForFilename(date: Date): string {
@@ -30,8 +53,8 @@ function normalizeBackupDir(): string {
 
 function safeBackupName(filename: string): string {
   const value = filename.trim();
-  if (!/^[A-Za-z0-9._-]+\.db$/.test(value)) {
-    throw new Error('Invalid backup filename. Expected pattern: [A-Za-z0-9._-]+.db');
+  if (!/^[A-Za-z0-9._-]+\.db(\.enc)?$/.test(value)) {
+    throw new Error('Invalid backup filename. Expected pattern: [A-Za-z0-9._-]+.db(.enc)');
   }
   return value;
 }
@@ -66,6 +89,100 @@ function shaPathFor(backupPath: string): string {
   return `${backupPath}.sha256`;
 }
 
+function metaPathFor(backupPath: string): string {
+  return `${backupPath}.meta.json`;
+}
+
+function readEncryptionMeta(backupPath: string): BackupEncryptionMeta | null {
+  const metaPath = metaPathFor(backupPath);
+  if (!fs.existsSync(metaPath)) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(metaPath, 'utf8')) as BackupEncryptionMeta;
+    if (!parsed || parsed.version !== 1 || parsed.algorithm !== 'aes-256-gcm') return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeEncryptionMeta(backupPath: string, meta: BackupEncryptionMeta): void {
+  fs.writeFileSync(metaPathFor(backupPath), JSON.stringify(meta, null, 2), 'utf8');
+}
+
+function removeEncryptionMeta(backupPath: string): void {
+  const metaPath = metaPathFor(backupPath);
+  if (fs.existsSync(metaPath)) {
+    fs.unlinkSync(metaPath);
+  }
+}
+
+function parseKmsMasterKey(): Buffer | null {
+  const raw = process.env.VAULT_BACKUP_KMS_MASTER_KEY?.trim();
+  if (!raw) return null;
+  if (/^[a-fA-F0-9]{64}$/.test(raw)) return Buffer.from(raw, 'hex');
+  try {
+    const b64 = Buffer.from(raw, 'base64');
+    if (b64.length >= 32) return crypto.createHash('sha256').update(b64).digest();
+  } catch {
+    // Fall through.
+  }
+  return crypto.createHash('sha256').update(raw, 'utf8').digest();
+}
+
+function encryptBufferWithKey(data: Buffer, key: Buffer): { encrypted: Buffer; iv: Buffer; tag: Buffer } {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const encrypted = Buffer.concat([cipher.update(data), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return { encrypted, iv, tag };
+}
+
+function decryptBufferWithKey(data: Buffer, key: Buffer, iv: Buffer, tag: Buffer): Buffer {
+  const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
+  decipher.setAuthTag(tag);
+  return Buffer.concat([decipher.update(data), decipher.final()]);
+}
+
+function encryptBackupAtRest(backupPath: string, config: BackupEncryptionInput): void {
+  const plain = fs.readFileSync(backupPath);
+
+  if (config.mode === 'passphrase') {
+    const passphrase = config.passphrase?.trim() || '';
+    if (!passphrase) throw new Error('passphrase is required for passphrase backup encryption');
+    const salt = crypto.randomBytes(16);
+    const key = crypto.scryptSync(passphrase, salt, 32);
+    const { encrypted, iv, tag } = encryptBufferWithKey(plain, key);
+    fs.writeFileSync(backupPath, encrypted);
+    writeEncryptionMeta(backupPath, {
+      version: 1,
+      algorithm: 'aes-256-gcm',
+      mode: 'passphrase',
+      iv: iv.toString('base64'),
+      tag: tag.toString('base64'),
+      salt: salt.toString('base64'),
+    });
+    return;
+  }
+
+  const kmsKey = parseKmsMasterKey();
+  if (!kmsKey) throw new Error('VAULT_BACKUP_KMS_MASTER_KEY is required for kms-envelope backup encryption');
+  const dataKey = crypto.randomBytes(32);
+  const payload = encryptBufferWithKey(plain, dataKey);
+  const wrapped = encryptBufferWithKey(dataKey, kmsKey);
+
+  fs.writeFileSync(backupPath, payload.encrypted);
+  writeEncryptionMeta(backupPath, {
+    version: 1,
+    algorithm: 'aes-256-gcm',
+    mode: 'kms-envelope',
+    iv: payload.iv.toString('base64'),
+    tag: payload.tag.toString('base64'),
+    wrappedKey: wrapped.encrypted.toString('base64'),
+    wrapIv: wrapped.iv.toString('base64'),
+    wrapTag: wrapped.tag.toString('base64'),
+  });
+}
+
 function computeSha256(filePath: string): string {
   return crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 }
@@ -88,18 +205,21 @@ function writeChecksum(backupPath: string): string {
 function toRecord(filePath: string): BackupRecord {
   const st = fs.statSync(filePath);
   const sha256 = readStoredChecksum(filePath);
+  const meta = readEncryptionMeta(filePath);
   return {
     filename: path.basename(filePath),
     bytes: st.size,
     createdAt: st.mtime.toISOString(),
     sha256,
+    encrypted: Boolean(meta),
+    encryptionMode: meta?.mode ?? 'none',
   };
 }
 
 export function listBackups(): BackupRecord[] {
   const dir = normalizeBackupDir();
   const files = fs.readdirSync(dir)
-    .filter((name) => name.endsWith('.db'))
+    .filter((name) => name.endsWith('.db') || name.endsWith('.db.enc'))
     .map((name) => path.join(dir, name))
     .filter((file) => fs.statSync(file).isFile())
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
@@ -119,6 +239,7 @@ export function enforceBackupRetention(): { deleted: string[]; kept: number } {
       fs.unlinkSync(filePath);
       const checksumPath = shaPathFor(filePath);
       if (fs.existsSync(checksumPath)) fs.unlinkSync(checksumPath);
+      removeEncryptionMeta(filePath);
       deleted.push(item.filename);
     } catch {
       // Best-effort retention cleanup.
@@ -128,10 +249,16 @@ export function enforceBackupRetention(): { deleted: string[]; kept: number } {
   return { deleted, kept: Math.min(backups.length, keep) };
 }
 
-export async function createBackup(filename?: string): Promise<BackupRecord> {
-  const actualName = safeBackupName(filename?.trim() || `vault-${timestampForFilename(new Date())}.db`);
+export async function createBackup(filename?: string, options: CreateBackupOptions = {}): Promise<BackupRecord> {
+  const defaultName = `vault-${timestampForFilename(new Date())}${options.encryption ? '.db.enc' : '.db'}`;
+  const actualName = safeBackupName(filename?.trim() || defaultName);
   const backupPath = toBackupPath(actualName);
   await db.backup(backupPath);
+  if (options.encryption) {
+    encryptBackupAtRest(backupPath, options.encryption);
+  } else {
+    removeEncryptionMeta(backupPath);
+  }
   writeChecksum(backupPath);
   enforceBackupRetention();
   return toRecord(backupPath);
@@ -187,7 +314,11 @@ export function verifySignedBackupToken(token: string, action: SignedAction): Si
   return payload;
 }
 
-export async function writeUploadedBackup(filename: string, body: NodeJS.ReadableStream): Promise<BackupRecord> {
+export async function writeUploadedBackup(
+  filename: string,
+  body: NodeJS.ReadableStream,
+  options: CreateBackupOptions = {},
+): Promise<BackupRecord> {
   const backupPath = toBackupPath(filename);
   const maxBytes = maxUploadBytes();
 
@@ -213,12 +344,21 @@ export async function writeUploadedBackup(filename: string, body: NodeJS.Readabl
   }
 
   fs.writeFileSync(backupPath, Buffer.concat(chunks));
+  if (options.encryption) {
+    encryptBackupAtRest(backupPath, options.encryption);
+  } else {
+    removeEncryptionMeta(backupPath);
+  }
   writeChecksum(backupPath);
   enforceBackupRetention();
   return toRecord(backupPath);
 }
 
-export function restoreBackup(filename: string, verifyChecksum = true): { restored: string; rows: Record<string, number> } {
+export function restoreBackup(
+  filename: string,
+  verifyChecksum = true,
+  options: { passphrase?: string } = {},
+): { restored: string; rows: Record<string, number> } {
   const backupPath = toBackupPath(filename);
   if (!fs.existsSync(backupPath)) {
     throw new Error('Backup file not found');
@@ -231,7 +371,42 @@ export function restoreBackup(filename: string, verifyChecksum = true): { restor
     }
   }
 
-  const escaped = backupPath.replace(/'/g, "''");
+  const meta = readEncryptionMeta(backupPath);
+  let attachPath = backupPath;
+  let tempPath: string | null = null;
+
+  if (meta) {
+    const encrypted = fs.readFileSync(backupPath);
+    const iv = Buffer.from(meta.iv, 'base64');
+    const tag = Buffer.from(meta.tag, 'base64');
+
+    let plain: Buffer;
+    if (meta.mode === 'passphrase') {
+      const passphrase = options.passphrase?.trim() || '';
+      if (!passphrase) {
+        throw new Error('passphrase is required to restore this encrypted backup');
+      }
+      const salt = Buffer.from(meta.salt ?? '', 'base64');
+      const key = crypto.scryptSync(passphrase, salt, 32);
+      plain = decryptBufferWithKey(encrypted, key, iv, tag);
+    } else {
+      const kmsKey = parseKmsMasterKey();
+      if (!kmsKey) {
+        throw new Error('VAULT_BACKUP_KMS_MASTER_KEY is required to restore kms-envelope backups');
+      }
+      const wrappedKey = Buffer.from(meta.wrappedKey ?? '', 'base64');
+      const wrapIv = Buffer.from(meta.wrapIv ?? '', 'base64');
+      const wrapTag = Buffer.from(meta.wrapTag ?? '', 'base64');
+      const dataKey = decryptBufferWithKey(wrappedKey, kmsKey, wrapIv, wrapTag);
+      plain = decryptBufferWithKey(encrypted, dataKey, iv, tag);
+    }
+
+    tempPath = path.join(normalizeBackupDir(), `.restore-${Date.now()}-${Math.random().toString(16).slice(2)}.db`);
+    fs.writeFileSync(tempPath, plain);
+    attachPath = tempPath;
+  }
+
+  const escaped = attachPath.replace(/'/g, "''");
   db.exec(`ATTACH DATABASE '${escaped}' AS restore_src`);
 
   const hasTableStmt = db.prepare<[string], { ok: number }>(
@@ -318,6 +493,9 @@ export function restoreBackup(filename: string, verifyChecksum = true): { restor
     copy();
   } finally {
     db.exec('DETACH DATABASE restore_src');
+    if (tempPath && fs.existsSync(tempPath)) {
+      fs.unlinkSync(tempPath);
+    }
   }
 
   const counts = {

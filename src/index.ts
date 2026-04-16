@@ -13,6 +13,7 @@ import cloudRouter from './routes/cloud.js';
 import { opsRouter } from './routes/ops.js';
 import { configRouter } from './routes/config.js';
 import { getRuntimeState, isWriteBlocked } from './runtime-state.js';
+import { metricsRouter } from './routes/metrics.js';
 
 const required = ['VAULT_ACCESS_TOKEN', 'VAULT_ADMIN_TOKEN', 'VAULT_MASTER_SECRET'];
 for (const v of required) {
@@ -204,6 +205,7 @@ app.use('/api/keys', writeLimit, vaultRouter);
 app.use('/api/audit', auditRouter);
 app.use('/api/ops', opsRouter);
 app.use('/api/config', configRouter);
+app.use('/api', metricsRouter);
 app.use('/', cloudRouter);
 
 app.get('/api/health', (_req, res) => {

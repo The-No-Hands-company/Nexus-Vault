@@ -1,7 +1,9 @@
 import { Router } from 'express';
-import { requireAdminToken } from '../auth.js';
+import { getTokenStateSummary, requireAdminToken, rotateTokensAtomic } from '../auth.js';
+import { logAudit } from '../db.js';
 import {
   backupDirPath,
+  type BackupEncryptionInput,
   createBackup,
   createSignedBackupToken,
   databasePath,
@@ -13,11 +15,66 @@ import {
   writeUploadedBackup,
 } from '../ops.js';
 import { getRuntimeState, setMaintenanceMode, setRestoreInProgress } from '../runtime-state.js';
+import { incCounter } from '../metrics.js';
 
 export const opsRouter = Router();
 
+function clientIp(req: any): string {
+  return (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
+    ?? req.socket.remoteAddress
+    ?? 'unknown';
+}
+
 opsRouter.get('/state', requireAdminToken, (_req, res) => {
   res.json({ state: getRuntimeState() });
+});
+
+opsRouter.get('/tokens/state', requireAdminToken, (_req, res) => {
+  res.json({ state: getTokenStateSummary() });
+});
+
+opsRouter.post('/tokens/rotate', requireAdminToken, (req, res) => {
+  try {
+    const mode = req.body?.mode === 'append' ? 'append' : 'replace';
+    const accessTokens = Array.isArray(req.body?.accessTokens)
+      ? req.body.accessTokens.map((value: unknown) => String(value).trim()).filter(Boolean)
+      : undefined;
+    const adminTokens = Array.isArray(req.body?.adminTokens)
+      ? req.body.adminTokens.map((value: unknown) => String(value).trim()).filter(Boolean)
+      : undefined;
+
+    const result = rotateTokensAtomic({
+      accessTokens,
+      adminTokens,
+      mode,
+    });
+
+    logAudit(
+      '__auth__',
+      'TOKEN_ROTATE',
+      clientIp(req),
+      String(req.headers['user-agent'] ?? ''),
+      JSON.stringify({
+        mode,
+        rotatedAccessTokens: accessTokens?.length ?? 0,
+        rotatedAdminTokens: adminTokens?.length ?? 0,
+        resultingAccessCount: result.accessCount,
+        resultingAdminCount: result.adminCount,
+      }),
+    );
+
+    incCounter('vault_token_rotation_total', 'Total token rotation operations', 1, {
+      result: 'ok',
+      mode,
+    });
+
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    incCounter('vault_token_rotation_total', 'Total token rotation operations', 1, {
+      result: 'failed',
+    });
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
 });
 
 opsRouter.post('/maintenance', requireAdminToken, (req, res) => {
@@ -46,10 +103,27 @@ opsRouter.get('/backups', requireAdminToken, (_req, res) => {
 opsRouter.post('/backups/create', requireAdminToken, async (req, res) => {
   try {
     const filename = typeof req.body?.filename === 'string' ? req.body.filename : undefined;
-    const created = await createBackup(filename);
+    let encryption: BackupEncryptionInput | undefined;
+    if (req.body?.encryption && typeof req.body.encryption === 'object') {
+      const mode: BackupEncryptionInput['mode'] = req.body.encryption.mode === 'kms-envelope'
+        ? 'kms-envelope'
+        : 'passphrase';
+      const passphrase = typeof req.body.encryption.passphrase === 'string'
+        ? req.body.encryption.passphrase
+        : undefined;
+      encryption = { mode, passphrase };
+    }
+    const created = await createBackup(filename, encryption ? { encryption } : undefined);
     const retention = enforceBackupRetention();
+    incCounter('vault_ops_backup_create_total', 'Total backup create operations', 1, {
+      result: 'ok',
+      encrypted: created.encrypted,
+    });
     res.status(201).json({ ok: true, created, retention });
   } catch (err) {
+    incCounter('vault_ops_backup_create_total', 'Total backup create operations', 1, {
+      result: 'failed',
+    });
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });
@@ -101,8 +175,14 @@ opsRouter.get('/backups/download', (req, res) => {
 
     res.setHeader('Content-Type', 'application/octet-stream');
     res.setHeader('Content-Disposition', `attachment; filename="${payload.filename}"`);
+    incCounter('vault_ops_backup_download_total', 'Total backup downloads', 1, {
+      result: 'ok',
+    });
     res.sendFile(payload.filename, { root: backupDirPath() });
   } catch (err) {
+    incCounter('vault_ops_backup_download_total', 'Total backup downloads', 1, {
+      result: 'failed',
+    });
     res.status(401).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });
@@ -136,10 +216,27 @@ opsRouter.put('/backups/upload', async (req, res) => {
 
   try {
     const payload = verifySignedBackupToken(token, 'backup-upload');
-    const uploaded = await writeUploadedBackup(payload.filename, req);
+    const encryptionMode = String(req.query.encryption ?? '').toLowerCase();
+    const passphrase = typeof req.headers['x-vault-backup-passphrase'] === 'string'
+      ? req.headers['x-vault-backup-passphrase']
+      : undefined;
+    let encryption: BackupEncryptionInput | undefined;
+    if (encryptionMode === 'passphrase' || encryptionMode === 'kms-envelope') {
+      const mode: BackupEncryptionInput['mode'] = encryptionMode;
+      encryption = { mode, passphrase };
+    }
+
+    const uploaded = await writeUploadedBackup(payload.filename, req, encryption ? { encryption } : undefined);
     const retention = enforceBackupRetention();
+    incCounter('vault_ops_backup_upload_total', 'Total backup uploads', 1, {
+      result: 'ok',
+      encrypted: uploaded.encrypted,
+    });
     res.status(201).json({ ok: true, uploaded, retention });
   } catch (err) {
+    incCounter('vault_ops_backup_upload_total', 'Total backup uploads', 1, {
+      result: 'failed',
+    });
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });
@@ -168,10 +265,17 @@ opsRouter.post('/backups/restore', requireAdminToken, (req, res) => {
     }
 
     const verifyChecksum = req.body?.verifyChecksum !== false;
+    const passphrase = typeof req.body?.passphrase === 'string' ? req.body.passphrase : undefined;
     setRestoreInProgress(true);
-    const restored = restoreBackup(filename, verifyChecksum);
+    const restored = restoreBackup(filename, verifyChecksum, { passphrase });
+    incCounter('vault_ops_backup_restore_total', 'Total backup restore operations', 1, {
+      result: 'ok',
+    });
     res.json({ ok: true, ...restored });
   } catch (err) {
+    incCounter('vault_ops_backup_restore_total', 'Total backup restore operations', 1, {
+      result: 'failed',
+    });
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
   } finally {
     setRestoreInProgress(false);
