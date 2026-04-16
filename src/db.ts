@@ -1,9 +1,10 @@
 import Database from 'better-sqlite3';
 import path from 'path';
 import fs from 'fs';
+import { createHmac } from 'crypto';
 
-const DB_DIR = process.env.VAULT_DATA_DIR ?? './data';
-const DB_PATH = path.join(DB_DIR, 'vault.db');
+export const DB_DIR = process.env.VAULT_DATA_DIR ?? './data';
+export const DB_PATH = path.join(DB_DIR, 'vault.db');
 
 if (!fs.existsSync(DB_DIR)) {
   fs.mkdirSync(DB_DIR, { recursive: true });
@@ -14,7 +15,15 @@ export const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
-db.exec(`
+type Migration = {
+  id: string;
+  sql: string;
+};
+
+const MIGRATIONS: Migration[] = [
+  {
+    id: '001_initial_schema',
+    sql: `
 CREATE TABLE IF NOT EXISTS vault_collections (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   name TEXT NOT NULL UNIQUE,
@@ -66,7 +75,86 @@ CREATE TABLE IF NOT EXISTS audit_log (
   meta TEXT NOT NULL,
   timestamp TEXT NOT NULL DEFAULT (datetime('now'))
 );
+`,
+  },
+  {
+    id: '002_indexes',
+    sql: `
+CREATE INDEX IF NOT EXISTS idx_vault_entries_category ON vault_entries(category);
+CREATE INDEX IF NOT EXISTS idx_vault_entries_collection ON vault_entries(collection_id);
+CREATE INDEX IF NOT EXISTS idx_vault_entries_active ON vault_entries(is_active);
+CREATE INDEX IF NOT EXISTS idx_audit_log_entry ON audit_log(entry_name);
+CREATE INDEX IF NOT EXISTS idx_audit_log_action ON audit_log(action);
+CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp ON audit_log(timestamp);
+`,
+  },
+  {
+    id: '003_audit_chain',
+    sql: `ALTER TABLE audit_log ADD COLUMN prev_hash TEXT NOT NULL DEFAULT '';`,
+  },
+  {
+    id: '004_audit_verification_history',
+    sql: `
+CREATE TABLE IF NOT EXISTS audit_verification_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  source TEXT NOT NULL,
+  ok INTEGER NOT NULL,
+  broken_at INTEGER,
+  expected_hash TEXT,
+  got_hash TEXT,
+  total_entries INTEGER NOT NULL,
+  head_id INTEGER,
+  head_hash TEXT,
+  genesis_ok INTEGER NOT NULL,
+  details TEXT NOT NULL DEFAULT '',
+  alert_sent INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_verification_runs_created_at
+  ON audit_verification_runs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_verification_runs_ok
+  ON audit_verification_runs(ok);
+`,
+  },
+];
+
+export function runMigrations(): string[] {
+  db.exec(`
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  id TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `);
+
+  const applied = db.prepare<[], { id: string }>(`SELECT id FROM schema_migrations`).all();
+  const appliedSet = new Set(applied.map((row) => row.id));
+  const markApplied = db.prepare<[string], void>(`INSERT INTO schema_migrations (id) VALUES (?)`);
+
+  const executed: string[] = [];
+  for (const migration of MIGRATIONS) {
+    if (appliedSet.has(migration.id)) continue;
+    db.transaction(() => {
+      db.exec(migration.sql);
+      markApplied.run(migration.id);
+    })();
+    executed.push(migration.id);
+  }
+
+  return executed;
+}
+
+export function getAppliedMigrations(): string[] {
+  db.exec(`
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  id TEXT PRIMARY KEY,
+  applied_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+`);
+  return db.prepare<[], { id: string }>(`SELECT id FROM schema_migrations ORDER BY id`).all().map((row) => row.id);
+}
+
+runMigrations();
 
 export const VAULT_ENTRY_TYPES = ['api-key', 'password', 'note', 'recovery-code', 'token', 'card', 'secret'] as const;
 export type VaultEntryType = (typeof VAULT_ENTRY_TYPES)[number];
@@ -124,6 +212,23 @@ export interface AuditEntry {
   user_agent: string;
   timestamp: string;
   meta: string;
+  prev_hash: string;
+}
+
+export interface AuditVerificationRun {
+  id: number;
+  source: string;
+  ok: number;
+  broken_at: number | null;
+  expected_hash: string | null;
+  got_hash: string | null;
+  total_entries: number;
+  head_id: number | null;
+  head_hash: string | null;
+  genesis_ok: number;
+  details: string;
+  alert_sent: number;
+  created_at: string;
 }
 
 export interface VaultExportCollection {
@@ -427,6 +532,17 @@ export const auditQueries = {
     `INSERT INTO audit_log (entry_name, action, ip, user_agent, meta)
      VALUES (@entry_name, @action, @ip, @user_agent, @meta)`
   ),
+  insertChained: db.prepare<{
+    entry_name: string;
+    action: string;
+    ip: string;
+    user_agent: string;
+    meta: string;
+    prev_hash: string;
+  }, void>(
+    `INSERT INTO audit_log (entry_name, action, ip, user_agent, meta, prev_hash)
+     VALUES (@entry_name, @action, @ip, @user_agent, @meta, @prev_hash)`
+  ),
   getRecent: db.prepare<[number], AuditEntry>(
     `SELECT * FROM audit_log ORDER BY timestamp DESC LIMIT ?`
   ),
@@ -438,8 +554,142 @@ export const auditQueries = {
      FROM audit_log WHERE action = 'READ'
      GROUP BY entry_name ORDER BY access_count DESC`
   ),
+  getLastRow: db.prepare<[], AuditEntry>(
+    `SELECT * FROM audit_log ORDER BY id DESC LIMIT 1`
+  ),
 };
 
+export const verificationQueries = {
+  insert: db.prepare<{
+    source: string;
+    ok: number;
+    broken_at: number | null;
+    expected_hash: string | null;
+    got_hash: string | null;
+    total_entries: number;
+    head_id: number | null;
+    head_hash: string | null;
+    genesis_ok: number;
+    details: string;
+    alert_sent: number;
+  }, void>(
+    `INSERT INTO audit_verification_runs (
+      source, ok, broken_at, expected_hash, got_hash,
+      total_entries, head_id, head_hash, genesis_ok, details, alert_sent
+    ) VALUES (
+      @source, @ok, @broken_at, @expected_hash, @got_hash,
+      @total_entries, @head_id, @head_hash, @genesis_ok, @details, @alert_sent
+    )`
+  ),
+  getRecent: db.prepare<[number], AuditVerificationRun>(
+    `SELECT * FROM audit_verification_runs ORDER BY id DESC LIMIT ?`
+  ),
+  getLast: db.prepare<[], AuditVerificationRun>(
+    `SELECT * FROM audit_verification_runs ORDER BY id DESC LIMIT 1`
+  ),
+};
+
+/** Compute the HMAC-SHA256 hash of a canonical audit row representation. */
+function hashAuditRow(row: AuditEntry, key: string): string {
+  const canonical = JSON.stringify({
+    id: row.id,
+    entry_name: row.entry_name,
+    action: row.action,
+    ip: row.ip,
+    user_agent: row.user_agent,
+    timestamp: row.timestamp,
+    meta: row.meta,
+    prev_hash: row.prev_hash,
+  });
+  return createHmac('sha256', key).update(canonical).digest('hex');
+}
+
+/**
+ * Insert an audit log entry with a chained HMAC over the previous entry.
+ * The key defaults to VAULT_MASTER_SECRET so the chain is verifiable only
+ * by a party holding the master secret.
+ */
 export function logAudit(entry_name: string, action: string, ip = 'unknown', user_agent = '', meta = '') {
-  auditQueries.insert.run({ entry_name, action, ip, user_agent, meta });
+  const key = process.env.VAULT_MASTER_SECRET ?? '';
+  const last = auditQueries.getLastRow.get();
+  const prev_hash = last ? hashAuditRow(last, key) : 'genesis';
+  auditQueries.insertChained.run({ entry_name, action, ip, user_agent, meta, prev_hash });
+}
+
+/**
+ * Verify the audit chain integrity. Returns the first broken link (if any).
+ * Only works when called with the same VAULT_MASTER_SECRET used at write time.
+ */
+export function verifyAuditChain(): { ok: true } | { ok: false; brokenAt: number; expected: string; got: string } {
+  const key = process.env.VAULT_MASTER_SECRET ?? '';
+  const rows = db.prepare<[], AuditEntry>(`SELECT * FROM audit_log ORDER BY id ASC`).all();
+  for (let i = 1; i < rows.length; i++) {
+    const expected = hashAuditRow(rows[i - 1]!, key);
+    if (rows[i]!.prev_hash !== expected) {
+      return { ok: false, brokenAt: rows[i]!.id, expected, got: rows[i]!.prev_hash };
+    }
+  }
+  return { ok: true };
+}
+
+export function getAuditChainStatus(): {
+  totalEntries: number;
+  headId: number | null;
+  headHash: string | null;
+  genesisOk: boolean;
+} {
+  const key = process.env.VAULT_MASTER_SECRET ?? '';
+  const rows = db.prepare<[], AuditEntry>(`SELECT * FROM audit_log ORDER BY id ASC`).all();
+  if (!rows.length) {
+    return {
+      totalEntries: 0,
+      headId: null,
+      headHash: null,
+      genesisOk: true,
+    };
+  }
+  const head = rows[rows.length - 1]!;
+  return {
+    totalEntries: rows.length,
+    headId: head.id,
+    headHash: hashAuditRow(head, key),
+    genesisOk: rows[0]!.prev_hash === 'genesis',
+  };
+}
+
+export function recordAuditVerificationRun(input: {
+  source: string;
+  ok: boolean;
+  status: {
+    totalEntries: number;
+    headId: number | null;
+    headHash: string | null;
+    genesisOk: boolean;
+  };
+  verification: { ok: true } | { ok: false; brokenAt: number; expected: string; got: string };
+  details: string;
+  alertSent: boolean;
+}): void {
+  verificationQueries.insert.run({
+    source: input.source,
+    ok: input.ok ? 1 : 0,
+    broken_at: input.verification.ok ? null : input.verification.brokenAt,
+    expected_hash: input.verification.ok ? null : input.verification.expected,
+    got_hash: input.verification.ok ? null : input.verification.got,
+    total_entries: input.status.totalEntries,
+    head_id: input.status.headId,
+    head_hash: input.status.headHash,
+    genesis_ok: input.status.genesisOk ? 1 : 0,
+    details: input.details,
+    alert_sent: input.alertSent ? 1 : 0,
+  });
+}
+
+export function getLastAuditVerificationRun(): AuditVerificationRun | null {
+  return verificationQueries.getLast.get() ?? null;
+}
+
+export function listAuditVerificationRuns(limit = 100): AuditVerificationRun[] {
+  const safeLimit = Math.max(1, Math.min(limit, 1000));
+  return verificationQueries.getRecent.all(safeLimit);
 }

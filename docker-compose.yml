@@ -9,6 +9,7 @@ services:
       - "3900:3900"
     volumes:
       - vault_data:/app/data
+      - vault_backups:/app/backups
     environment:
       # ── REQUIRED — change all three before first run ──────────────────────
       VAULT_MASTER_SECRET: "change-me-to-a-long-random-string-32-chars-min"
@@ -19,12 +20,21 @@ services:
       NODE_ENV: "production"
       # Restrict CORS to your own domains when hosted
       # CORS_ORIGIN: "https://your-app.railway.app"
+      VAULT_BACKUP_DIR: "/app/backups"
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3900/api/health"]
+      test: ["CMD", "wget", "-qO-", "http://localhost:3900/api/ready"]
       interval: 30s
       timeout: 5s
+      start_period: 15s
       retries: 3
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
 
 volumes:
   vault_data:
+    driver: local
+  vault_backups:
     driver: local

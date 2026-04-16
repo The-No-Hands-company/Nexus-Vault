@@ -1,0 +1,24 @@
+# Development and source files
+src/
+*.ts
+tsconfig.json
+Nexus-Vault.code-workspace
+
+# Local/runtime artifacts
+data/
+backups/
+*.db
+*.log
+
+# Tooling and VCS metadata
+.github/
+.githooks/
+.git/
+
+# Dependency and build cache
+node_modules/
+
+# Docker/compose not needed for npm consumers
+docker-compose.yml
+Dockerfile
+docker-entrypoint.sh
