@@ -15,11 +15,12 @@ import { configRouter } from './routes/config.js';
 import { getRuntimeState, isWriteBlocked } from './runtime-state.js';
 import { metricsRouter } from './routes/metrics.js';
 import { httpObservabilityMiddleware } from './observability.js';
+import { logger, requestLoggingMiddleware } from './logger.js';
 
 const required = ['VAULT_ACCESS_TOKEN', 'VAULT_ADMIN_TOKEN', 'VAULT_MASTER_SECRET'];
 for (const v of required) {
   if (!process.env[v]) {
-    console.error(`[vault] Missing required env var: ${v}`);
+    logger.error('startup.env.missing', { envVar: v });
     process.exit(1);
   }
 }
@@ -137,16 +138,19 @@ function enforceAuditIntegrityOnStartup(): void {
   });
 
   if (!verification.ok) {
-    const errorPayload = JSON.stringify({ ...verification, ...status });
+    const payload = { ...verification, ...status };
     if (failOnIntegrityError) {
-      console.error(`[vault] Startup blocked due to audit integrity failure: ${errorPayload}`);
+      logger.error('startup.audit_integrity.blocked', payload);
       process.exit(1);
     }
-    console.warn(`[vault] Audit integrity warning (continuing due to VAULT_FAIL_ON_AUDIT_INTEGRITY_ERROR=false): ${errorPayload}`);
+    logger.warn('startup.audit_integrity.warning', payload);
     return;
   }
 
-  console.log(`[vault] Audit chain verified on startup (entries=${status.totalEntries}, headId=${status.headId ?? 'none'})`);
+  logger.info('startup.audit_integrity.ok', {
+    entries: status.totalEntries,
+    headId: status.headId ?? 'none',
+  });
 }
 
 enforceAuditIntegrityOnStartup();
@@ -178,6 +182,7 @@ const writeLimit = rateLimit({
 
 app.use(express.json({ limit: '64kb' }));
 app.use(httpObservabilityMiddleware);
+app.use(requestLoggingMiddleware);
 
 app.use((req, res, next) => {
   const isWriteMethod = ['POST', 'PUT', 'PATCH', 'DELETE'].includes(req.method);
@@ -249,9 +254,14 @@ app.get('*', (_req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const requestId = String(res.locals.requestId ?? 'unknown');
-  console.error('[vault]', requestId, err.message);
+  logger.error('http.unhandled_error', {
+    requestId,
+    method: req.method,
+    path: req.path,
+    error: err,
+  });
   res.status(500).json({ error: 'Internal server error', requestId });
 });
 
@@ -260,7 +270,7 @@ const verificationTimer = startPeriodicVerification();
 
 const server = app.listen(PORT, () => {
   isReady = true;
-  console.log(`\n🔐 Nexus Vault running on http://localhost:${PORT}\n`);
+  logger.info('startup.http_listen', { port: PORT, url: `http://localhost:${PORT}` });
 });
 
 function beginGracefulShutdown(signal: string): void {
@@ -268,18 +278,18 @@ function beginGracefulShutdown(signal: string): void {
   isDraining = true;
   isReady = false;
 
-  console.log(`[vault] ${signal} received, draining HTTP server`);
+  logger.info('shutdown.begin', { signal });
   stopPeriodicVerification(verificationTimer);
 
   const forceMs = Math.max(1000, parseInt(process.env.VAULT_SHUTDOWN_TIMEOUT_MS ?? '15000', 10));
   const forceTimer = setTimeout(() => {
-    console.error('[vault] Graceful shutdown timeout exceeded, forcing exit');
+    logger.error('shutdown.force_exit', { timeoutMs: forceMs });
     process.exit(1);
   }, forceMs);
 
   server.close(() => {
     clearTimeout(forceTimer);
-    console.log('[vault] HTTP server drained, shutdown complete');
+    logger.info('shutdown.complete');
     process.exit(0);
   });
 }

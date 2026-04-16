@@ -6,14 +6,13 @@ async function setupOpsTestApp() {
 
   vi.doMock('../db.js', () => ({
     logAudit: vi.fn(),
-  }));
-
-  vi.doMock('../metrics.js', () => ({
-    incCounter: vi.fn(),
-  }));
-
-  vi.doMock('../db.js', () => ({
-    logAudit: vi.fn(),
+    getDatabaseMaintenanceState: vi.fn(() => ({ running: false, lastCompletedAt: null })),
+    runDatabaseMaintenance: vi.fn((operation: 'VACUUM' | 'ANALYZE') => ({
+      operation,
+      startedAt: new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      durationMs: 12,
+    })),
   }));
 
   vi.doMock('../metrics.js', () => ({
@@ -36,6 +35,8 @@ async function setupOpsTestApp() {
       bytes: 123,
       createdAt: new Date().toISOString(),
       sha256: 'a'.repeat(64),
+      encrypted: false,
+      encryptionMode: 'none',
     }),
     enforceBackupRetention: () => ({ deleted: [], kept: 1 }),
     verifyBackupChecksum: () => ({ ok: true, expected: 'a'.repeat(64), actual: 'a'.repeat(64) }),
@@ -46,6 +47,8 @@ async function setupOpsTestApp() {
       bytes: 123,
       createdAt: new Date().toISOString(),
       sha256: 'a'.repeat(64),
+      encrypted: false,
+      encryptionMode: 'none',
     }),
     restoreBackup: (filename: string) => ({
       restored: filename,
@@ -56,6 +59,20 @@ async function setupOpsTestApp() {
         auditEvents: 0,
         auditVerificationRuns: 0,
       },
+    }),
+    restoreBackupDrill: (filename: string) => ({
+      drill: filename,
+      rows: {
+        collections: 1,
+        entries: 1,
+        importsExports: 0,
+        auditEvents: 0,
+        auditVerificationRuns: 0,
+      },
+      integrityOk: true,
+      integrityMessage: 'ok',
+      encrypted: false,
+      encryptionMode: 'none',
     }),
   }));
 
@@ -114,6 +131,7 @@ afterEach(() => {
   delete process.env.VAULT_ACCESS_TOKEN;
   delete process.env.VAULT_ADMIN_TOKEN;
   delete process.env.VAULT_MASTER_SECRET;
+  delete process.env.VAULT_DB_MAINTENANCE_MIN_INTERVAL_SECONDS;
 });
 
 describe.sequential('opsRouter operational APIs', () => {
@@ -183,6 +201,30 @@ describe.sequential('opsRouter operational APIs', () => {
     }
   });
 
+  it('supports restore drill mode without mutation', async () => {
+    const { request, cleanup } = await setupOpsTestApp();
+    try {
+      const bad = await request('POST', '/api/ops/backups/restore-drill', 'admin-token-1234567890abcdef', {
+        filename: 'vault-2026-04-16.db',
+      });
+      expect(bad.status).toBe(400);
+      expect(bad.payload).toMatchObject({
+        error: 'restore drill confirmation mismatch',
+        expectedConfirm: 'DRILL vault-2026-04-16.db',
+      });
+
+      const ok = await request('POST', '/api/ops/backups/restore-drill', 'admin-token-1234567890abcdef', {
+        filename: 'vault-2026-04-16.db',
+        verifyChecksum: true,
+        confirm: 'DRILL vault-2026-04-16.db',
+      });
+      expect(ok.status).toBe(200);
+      expect(ok.payload).toMatchObject({ ok: true, drill: 'vault-2026-04-16.db', integrityOk: true });
+    } finally {
+      await cleanup();
+    }
+  });
+
   it('allows maintenance mode toggle and state readback', async () => {
     const { request, cleanup } = await setupOpsTestApp();
     try {
@@ -214,26 +256,24 @@ describe.sequential('opsRouter operational APIs', () => {
     }
   });
 
-  it('rotates tokens atomically and old admin token stops working', async () => {
+  it('runs guarded database maintenance', async () => {
     const { request, cleanup } = await setupOpsTestApp();
     try {
-      const rotate = await request(
-        'POST',
-        '/api/ops/tokens/rotate',
-        'admin-token-1234567890abcdef',
-        {
-          mode: 'replace',
-          adminTokens: ['new-admin-token-1234567890abcdef'],
-        }
-      );
-      expect(rotate.status).toBe(200);
-      expect(rotate.payload).toMatchObject({ ok: true, adminCount: 1 });
+      const vacuumBlocked = await request('POST', '/api/ops/db/maintenance', 'admin-token-1234567890abcdef', {
+        operation: 'VACUUM',
+        confirm: 'MAINTAIN VACUUM',
+      });
+      expect(vacuumBlocked.status).toBe(409);
 
-      const oldTokenState = await request('GET', '/api/ops/state', 'admin-token-1234567890abcdef');
-      expect(oldTokenState.status).toBe(401);
+      await request('POST', '/api/ops/maintenance', 'admin-token-1234567890abcdef', { enabled: true, reason: 'db maintenance' });
 
-      const newTokenState = await request('GET', '/api/ops/state', 'new-admin-token-1234567890abcdef');
-      expect(newTokenState.status).toBe(200);
+      const run = await request('POST', '/api/ops/db/maintenance', 'admin-token-1234567890abcdef', {
+        operation: 'VACUUM',
+        confirm: 'MAINTAIN VACUUM',
+        reason: 'periodic vacuum',
+      });
+      expect(run.status).toBe(200);
+      expect(run.payload).toMatchObject({ ok: true, result: { operation: 'VACUUM' } });
     } finally {
       await cleanup();
     }

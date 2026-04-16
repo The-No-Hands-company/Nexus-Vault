@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { getTokenStateSummary, requireAdminToken, rotateTokensAtomic } from '../auth.js';
-import { logAudit } from '../db.js';
+import { getDatabaseMaintenanceState, logAudit, runDatabaseMaintenance } from '../db.js';
 import {
   backupDirPath,
   type BackupEncryptionInput,
@@ -10,6 +10,7 @@ import {
   enforceBackupRetention,
   listBackups,
   restoreBackup,
+  restoreBackupDrill,
   verifyBackupChecksum,
   verifySignedBackupToken,
   writeUploadedBackup,
@@ -23,6 +24,18 @@ function clientIp(req: any): string {
   return (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim()
     ?? req.socket.remoteAddress
     ?? 'unknown';
+}
+
+function asPositiveInt(raw: unknown, fallback: number, max: number): number {
+  const value = parseInt(String(raw ?? fallback), 10);
+  if (Number.isNaN(value) || value <= 0) return fallback;
+  return Math.min(value, max);
+}
+
+function minMaintenanceIntervalSeconds(): number {
+  const raw = parseInt(process.env.VAULT_DB_MAINTENANCE_MIN_INTERVAL_SECONDS ?? '300', 10);
+  if (Number.isNaN(raw) || raw < 0) return 300;
+  return Math.min(raw, 86_400);
 }
 
 opsRouter.get('/state', requireAdminToken, (_req, res) => {
@@ -84,11 +97,97 @@ opsRouter.post('/maintenance', requireAdminToken, (req, res) => {
   res.json({ ok: true, state });
 });
 
-function asPositiveInt(raw: unknown, fallback: number, max: number): number {
-  const value = parseInt(String(raw ?? fallback), 10);
-  if (Number.isNaN(value) || value <= 0) return fallback;
-  return Math.min(value, max);
-}
+opsRouter.get('/db/maintenance', requireAdminToken, (_req, res) => {
+  const runtime = getRuntimeState();
+  const state = getDatabaseMaintenanceState();
+  res.json({
+    state,
+    guardrails: {
+      minIntervalSeconds: minMaintenanceIntervalSeconds(),
+      vacuumRequiresMaintenanceMode: true,
+      restoreInProgress: runtime.restoreInProgress,
+    },
+  });
+});
+
+opsRouter.post('/db/maintenance', requireAdminToken, (req, res) => {
+  const runtime = getRuntimeState();
+  const operationRaw = String(req.body?.operation ?? '').trim().toUpperCase();
+  const operation = operationRaw === 'VACUUM' || operationRaw === 'ANALYZE' ? operationRaw : null;
+
+  if (!operation) {
+    res.status(400).json({ error: 'operation must be VACUUM or ANALYZE' });
+    return;
+  }
+
+  const expectedConfirm = `MAINTAIN ${operation}`;
+  const confirm = String(req.body?.confirm ?? '').trim();
+  if (confirm !== expectedConfirm) {
+    res.status(400).json({ error: 'maintenance confirmation mismatch', expectedConfirm });
+    return;
+  }
+
+  if (runtime.restoreInProgress) {
+    res.status(409).json({ error: 'Cannot run maintenance during restore operation' });
+    return;
+  }
+
+  if (operation === 'VACUUM' && !runtime.maintenanceMode) {
+    res.status(409).json({ error: 'VACUUM requires maintenance mode enabled' });
+    return;
+  }
+
+  const state = getDatabaseMaintenanceState();
+  if (state.running) {
+    res.status(409).json({ error: 'Database maintenance already running' });
+    return;
+  }
+
+  if (state.lastCompletedAt) {
+    const minIntervalMs = minMaintenanceIntervalSeconds() * 1000;
+    const elapsed = Date.now() - Date.parse(state.lastCompletedAt);
+    if (elapsed < minIntervalMs) {
+      const retryAfterSeconds = Math.ceil((minIntervalMs - elapsed) / 1000);
+      res.status(409).json({
+        error: 'Database maintenance is rate-limited',
+        retryAfterSeconds,
+      });
+      return;
+    }
+  }
+
+  try {
+    const result = runDatabaseMaintenance(operation);
+    const reason = typeof req.body?.reason === 'string' ? req.body.reason.trim() : '';
+
+    logAudit(
+      '__db__',
+      'DB_MAINTENANCE',
+      clientIp(req),
+      String(req.headers['user-agent'] ?? ''),
+      JSON.stringify({
+        operation,
+        reason,
+        durationMs: result.durationMs,
+        startedAt: result.startedAt,
+        completedAt: result.completedAt,
+      }),
+    );
+
+    incCounter('vault_ops_db_maintenance_total', 'Total database maintenance operations', 1, {
+      result: 'ok',
+      operation,
+    });
+
+    res.json({ ok: true, result });
+  } catch (err) {
+    incCounter('vault_ops_db_maintenance_total', 'Total database maintenance operations', 1, {
+      result: 'failed',
+      operation,
+    });
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
+  }
+});
 
 opsRouter.get('/backups', requireAdminToken, (_req, res) => {
   const retentionCount = Math.max(1, parseInt(process.env.VAULT_BACKUP_RETENTION_COUNT ?? '20', 10));
@@ -279,5 +378,58 @@ opsRouter.post('/backups/restore', requireAdminToken, (req, res) => {
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
   } finally {
     setRestoreInProgress(false);
+  }
+});
+
+opsRouter.post('/backups/restore-drill', requireAdminToken, (req, res) => {
+  if (getRuntimeState().restoreInProgress) {
+    res.status(409).json({ error: 'A restore operation is already in progress' });
+    return;
+  }
+
+  try {
+    const filename = String(req.body?.filename ?? '').trim();
+    if (!filename) {
+      res.status(400).json({ error: 'filename is required' });
+      return;
+    }
+
+    const expectedConfirm = `DRILL ${filename}`;
+    const confirm = String(req.body?.confirm ?? '').trim();
+    if (confirm !== expectedConfirm) {
+      res.status(400).json({
+        error: 'restore drill confirmation mismatch',
+        expectedConfirm,
+      });
+      return;
+    }
+
+    const verifyChecksum = req.body?.verifyChecksum !== false;
+    const passphrase = typeof req.body?.passphrase === 'string' ? req.body.passphrase : undefined;
+    const result = restoreBackupDrill(filename, verifyChecksum, { passphrase });
+
+    logAudit(
+      '__backup__',
+      'BACKUP_RESTORE_DRILL',
+      clientIp(req),
+      String(req.headers['user-agent'] ?? ''),
+      JSON.stringify({
+        filename,
+        verifyChecksum,
+        integrityOk: result.integrityOk,
+        encryptionMode: result.encryptionMode,
+      }),
+    );
+
+    incCounter('vault_ops_backup_restore_drill_total', 'Total backup restore drill operations', 1, {
+      result: result.integrityOk ? 'ok' : 'failed',
+    });
+
+    res.json({ ok: true, ...result });
+  } catch (err) {
+    incCounter('vault_ops_backup_restore_drill_total', 'Total backup restore drill operations', 1, {
+      result: 'failed',
+    });
+    res.status(400).json({ error: err instanceof Error ? err.message : String(err) });
   }
 });

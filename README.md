@@ -66,6 +66,8 @@ The cloud client contract includes both legacy API-key style access and the broa
 | POST | `/api/ops/backups/create` | Create immediate DB backup and enforce retention |
 | GET | `/api/ops/state` | Get operational state (maintenance/restore flags) |
 | POST | `/api/ops/maintenance` | Toggle maintenance mode and optional reason |
+| GET | `/api/ops/db/maintenance` | Inspect DB maintenance state and guardrails |
+| POST | `/api/ops/db/maintenance` | Run guarded `VACUUM`/`ANALYZE` with explicit confirmation |
 | GET | `/api/ops/tokens/state` | Get token state summary (counts + updatedAt) |
 | POST | `/api/ops/tokens/rotate` | Atomic token rotation with audit trail |
 | GET | `/api/ops/backups/:filename/checksum` | Verify backup checksum integrity |
@@ -74,6 +76,7 @@ The cloud client contract includes both legacy API-key style access and the broa
 | POST | `/api/ops/backups/sign-upload` | Create signed backup upload token |
 | PUT | `/api/ops/backups/upload?token=...` | Upload backup binary via signed token |
 | POST | `/api/ops/backups/restore` | Restore DB from a backup file (explicit confirmation required) |
+| POST | `/api/ops/backups/restore-drill` | Dry-run restore integrity simulation (no live DB mutation) |
 | GET | `/api/metrics` | Structured metrics (`prometheus` text or `otel` JSON) |
 | GET | `/api/config/check` | Production safety preflight report (non-secret findings) |
 | GET | `/.well-known/nexus-cloud` | Cloud discovery |
@@ -215,6 +218,13 @@ Metrics envs:
 - `VAULT_HTTP_METRICS_ENABLED=true|false` — enable request-level HTTP metrics collection
 - `VAULT_HTTP_METRICS_IGNORE_PATHS=/api/metrics` — comma-separated path prefixes excluded from HTTP metrics
 
+Structured logging envs:
+
+- `VAULT_LOG_FORMAT=json|pretty` — output logs as structured JSON (default) or human-readable text
+- `VAULT_LOG_LEVEL=debug|info|warn|error` — minimum emitted log level
+- `VAULT_LOG_REQUEST_BODY=true|false` — include request body in logs (redacted before output)
+- `VAULT_LOG_MAX_FIELD_CHARS=1024` — truncate oversized logged fields to cap log payload size
+
 Request observability:
 
 - All responses include `X-Request-Id` (propagated from incoming header when present, otherwise generated).
@@ -307,6 +317,8 @@ Restore safety guardrails:
 
 - Restore requires explicit confirmation payload: `confirm: "RESTORE <filename>"`.
 - Restore accepts optional `passphrase` for encrypted passphrase backups.
+- Restore drill requires explicit confirmation payload: `confirm: "DRILL <filename>"`.
+- Restore drill simulates decrypt+attach+integrity checks and row counts without modifying the live DB.
 - During restore, readiness reports `503` with `restoreInProgress=true`.
 - Maintenance mode can be toggled via `POST /api/ops/maintenance` and inspected via `GET /api/ops/state`.
 
@@ -314,3 +326,11 @@ Token rotation safety:
 
 - Rotate via `POST /api/ops/tokens/rotate` with `mode` (`replace` or `append`) and `accessTokens` / `adminTokens` arrays.
 - Rotation is atomic in-memory cutover and emits audit event `TOKEN_ROTATE`.
+
+Database maintenance safety:
+
+- Maintenance endpoint supports only `VACUUM` and `ANALYZE` via `POST /api/ops/db/maintenance`.
+- Requires explicit confirmation string: `confirm: "MAINTAIN <OPERATION>"`.
+- `VACUUM` is allowed only when maintenance mode is enabled.
+- Operations are rate-limited by `VAULT_DB_MAINTENANCE_MIN_INTERVAL_SECONDS` (default: 300).
+- Runs are audit-logged as `DB_MAINTENANCE` with duration and operator reason.

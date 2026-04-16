@@ -509,6 +509,106 @@ export function restoreBackup(
   return { restored: filename, rows: counts };
 }
 
+export function restoreBackupDrill(
+  filename: string,
+  verifyChecksum = true,
+  options: { passphrase?: string } = {},
+): {
+  drill: string;
+  rows: Record<string, number>;
+  integrityOk: boolean;
+  integrityMessage: string;
+  encrypted: boolean;
+  encryptionMode: 'none' | 'passphrase' | 'kms-envelope';
+} {
+  const backupPath = toBackupPath(filename);
+  if (!fs.existsSync(backupPath)) {
+    throw new Error('Backup file not found');
+  }
+
+  if (verifyChecksum) {
+    const checksum = verifyBackupChecksum(filename);
+    if (!checksum.ok) {
+      throw new Error('Backup checksum verification failed');
+    }
+  }
+
+  const meta = readEncryptionMeta(backupPath);
+  let attachPath = backupPath;
+  let tempPath: string | null = null;
+
+  if (meta) {
+    const encrypted = fs.readFileSync(backupPath);
+    const iv = Buffer.from(meta.iv, 'base64');
+    const tag = Buffer.from(meta.tag, 'base64');
+
+    let plain: Buffer;
+    if (meta.mode === 'passphrase') {
+      const passphrase = options.passphrase?.trim() || '';
+      if (!passphrase) {
+        throw new Error('passphrase is required to drill this encrypted backup');
+      }
+      const salt = Buffer.from(meta.salt ?? '', 'base64');
+      const key = crypto.scryptSync(passphrase, salt, 32);
+      plain = decryptBufferWithKey(encrypted, key, iv, tag);
+    } else {
+      const kmsKey = parseKmsMasterKey();
+      if (!kmsKey) {
+        throw new Error('VAULT_BACKUP_KMS_MASTER_KEY is required to drill kms-envelope backups');
+      }
+      const wrappedKey = Buffer.from(meta.wrappedKey ?? '', 'base64');
+      const wrapIv = Buffer.from(meta.wrapIv ?? '', 'base64');
+      const wrapTag = Buffer.from(meta.wrapTag ?? '', 'base64');
+      const dataKey = decryptBufferWithKey(wrappedKey, kmsKey, wrapIv, wrapTag);
+      plain = decryptBufferWithKey(encrypted, dataKey, iv, tag);
+    }
+
+    tempPath = path.join(normalizeBackupDir(), `.drill-${Date.now()}-${Math.random().toString(16).slice(2)}.db`);
+    fs.writeFileSync(tempPath, plain);
+    attachPath = tempPath;
+  }
+
+  const escaped = attachPath.replace(/'/g, "''");
+  db.exec(`ATTACH DATABASE '${escaped}' AS restore_drill`);
+
+  try {
+    const hasTableStmt = db.prepare<[string], { ok: number }>(
+      `SELECT 1 as ok FROM restore_drill.sqlite_master WHERE type='table' AND name=? LIMIT 1`
+    );
+    const hasTable = (name: string): boolean => Boolean(hasTableStmt.get(name));
+
+    const countFromAttached = (table: string): number => {
+      if (!hasTable(table)) return 0;
+      const row = db.prepare<[], { count: number }>(`SELECT COUNT(*) AS count FROM restore_drill.${table}`).get();
+      return Number(row?.count ?? 0);
+    };
+
+    const integrityRows = db.prepare<[], { integrity_check: string }>('PRAGMA restore_drill.integrity_check').all();
+    const integrityMessage = integrityRows.map((row) => row.integrity_check).join('; ') || 'unknown';
+    const integrityOk = integrityRows.length > 0 && integrityRows.every((row) => row.integrity_check === 'ok');
+
+    return {
+      drill: filename,
+      rows: {
+        collections: countFromAttached('vault_collections'),
+        entries: countFromAttached('vault_entries'),
+        importsExports: countFromAttached('vault_import_exports'),
+        auditEvents: countFromAttached('audit_log'),
+        auditVerificationRuns: countFromAttached('audit_verification_runs'),
+      },
+      integrityOk,
+      integrityMessage,
+      encrypted: Boolean(meta),
+      encryptionMode: meta?.mode ?? 'none',
+    };
+  } finally {
+    db.exec('DETACH DATABASE restore_drill');
+    if (tempPath && fs.existsSync(tempPath)) {
+      fs.unlinkSync(tempPath);
+    }
+  }
+}
+
 export function backupDirPath(): string {
   return normalizeBackupDir();
 }

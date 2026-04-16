@@ -369,6 +369,56 @@ export function parseDateLike(value: string | null): string | null {
   return value ?? null;
 }
 
+  export type DatabaseMaintenanceOperation = 'VACUUM' | 'ANALYZE';
+
+  let maintenanceRunning = false;
+  let maintenanceLastCompletedAt: string | null = null;
+
+  export function getDatabaseMaintenanceState(): {
+    running: boolean;
+    lastCompletedAt: string | null;
+  } {
+    return {
+      running: maintenanceRunning,
+      lastCompletedAt: maintenanceLastCompletedAt,
+    };
+  }
+
+  export function runDatabaseMaintenance(operation: DatabaseMaintenanceOperation): {
+    operation: DatabaseMaintenanceOperation;
+    startedAt: string;
+    completedAt: string;
+    durationMs: number;
+  } {
+    if (maintenanceRunning) {
+      throw new Error('Database maintenance already running');
+    }
+
+    maintenanceRunning = true;
+    const started = Date.now();
+    const startedAt = new Date(started).toISOString();
+
+    try {
+      if (operation === 'VACUUM') {
+        db.pragma('wal_checkpoint(TRUNCATE)');
+        db.exec('VACUUM');
+      } else {
+        db.exec('ANALYZE');
+      }
+
+      const completedAt = new Date().toISOString();
+      maintenanceLastCompletedAt = completedAt;
+      return {
+        operation,
+        startedAt,
+        completedAt,
+        durationMs: Date.now() - started,
+      };
+    } finally {
+      maintenanceRunning = false;
+    }
+  }
+
 export const collectionQueries = {
   getAll: db.prepare<[], VaultCollection>(`SELECT * FROM vault_collections WHERE is_active = 1 ORDER BY name`),
   getById: db.prepare<[number], VaultCollection>(`SELECT * FROM vault_collections WHERE id = ? AND is_active = 1`),
