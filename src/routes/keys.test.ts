@@ -181,6 +181,7 @@ function createDbMockModule() {
       getPage: { all: (limit: number, offset: number) => entries.filter((e) => e.is_active === 1).slice(offset, offset + limit) },
       getCount: { get: () => ({ count: entries.filter((e) => e.is_active === 1).length }) },
       getByName: { get: (name: string) => byEntryName(name) },
+      getByNameAny: { get: (name: string) => entries.find((e) => e.name === name) ?? null },
       getByType: { all: (type: VaultEntryType) => entries.filter((e) => e.type === type && e.is_active === 1) },
       getByCategory: { all: (category: VaultCategory) => entries.filter((e) => e.category === category && e.is_active === 1) },
       getByCollection: { all: (collection_id: number) => entries.filter((e) => e.collection_id === collection_id && e.is_active === 1) },
@@ -286,6 +287,17 @@ function createDbMockModule() {
           existing.is_active = 0;
           existing.updated_at = now();
         },
+      },
+      reactivate: {
+        run: (id: number) => {
+          const existing = entries.find((e) => e.id === id);
+          if (!existing) return;
+          existing.is_active = 1;
+          existing.updated_at = now();
+        },
+      },
+      getDeleted: {
+        all: () => entries.filter((e) => e.is_active === 0).sort((a, b) => b.updated_at.localeCompare(a.updated_at)),
       },
     },
     exportQueries: {
@@ -972,6 +984,326 @@ describe.sequential('vaultRouter version history and restore', () => {
       // Read token cannot restore (admin required)
       const forbidden = await request('POST', '/api/keys/restorable/restore/1', 'read-token-1234567890abcdef');
       expect(forbidden.status).toBe(401);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+describe.sequential('vaultRouter sprint-4 hardening: input limits, soft-delete lifecycle, search filters', () => {
+  it('rejects value longer than 32768 characters', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      const res = await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'big-val',
+        value: 'x'.repeat(32769),
+      });
+      expect(res.status).toBe(400);
+      expect(res.payload).toMatchObject({ error: 'Validation failed' });
+      const details = (res.payload as { details?: Array<{ field?: string }> }).details;
+      expect(details?.some((d) => d.field === 'value')).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('rejects update value longer than 32768 characters', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', { name: 'val-update', value: 'ok' });
+      const res = await request('PUT', '/api/keys/val-update', 'admin-token-1234567890abcdef', {
+        value: 'x'.repeat(32769),
+      });
+      expect(res.status).toBe(400);
+      const details = (res.payload as { details?: Array<{ field?: string }> }).details;
+      expect(details?.some((d) => d.field === 'value')).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('rejects tags with more than 50 items', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      const res = await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'many-tags',
+        value: 'v',
+        tags: Array.from({ length: 51 }, (_, i) => `tag-${i}`),
+      });
+      expect(res.status).toBe(400);
+      const details = (res.payload as { details?: Array<{ field?: string }> }).details;
+      expect(details?.some((d) => d.field === 'tags')).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('rejects metadata serialised to more than 16KB', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      const bigMeta: Record<string, string> = {};
+      for (let i = 0; i < 200; i++) bigMeta[`key${i}`] = 'x'.repeat(100);
+      const res = await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'big-meta',
+        value: 'v',
+        metadata: bigMeta,
+      });
+      expect(res.status).toBe(400);
+      const details = (res.payload as { details?: Array<{ field?: string }> }).details;
+      expect(details?.some((d) => d.field === 'metadata')).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('GET /deleted lists soft-deleted entries; POST /undelete reactivates them', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'to-undelete',
+        value: 'resurrect-me',
+        type: 'secret',
+      });
+      await request('DELETE', '/api/keys/to-undelete', 'admin-token-1234567890abcdef');
+
+      const deleted = await request('GET', '/api/keys/deleted', 'admin-token-1234567890abcdef');
+      expect(deleted.status).toBe(200);
+      const list = deleted.payload as Array<{ name: string }>;
+      expect(Array.isArray(list)).toBe(true);
+      expect(list.some((e) => e.name === 'to-undelete')).toBe(true);
+
+      const unauth = await request('GET', '/api/keys/deleted', 'read-token-1234567890abcdef');
+      expect(unauth.status).toBe(401);
+
+      const undelete = await request('POST', '/api/keys/to-undelete/undelete', 'admin-token-1234567890abcdef');
+      expect(undelete.status).toBe(200);
+      expect(undelete.payload).toMatchObject({ name: 'to-undelete' });
+
+      const restored = await request('GET', '/api/keys/to-undelete', 'read-token-1234567890abcdef');
+      expect(restored.status).toBe(200);
+      expect(restored.payload).toMatchObject({ name: 'to-undelete', value: 'resurrect-me' });
+
+      const conflict = await request('POST', '/api/keys/to-undelete/undelete', 'admin-token-1234567890abcdef');
+      expect(conflict.status).toBe(409);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('GET /versions is accessible for deleted entries', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'versioned-del',
+        value: 'v0',
+        type: 'secret',
+      });
+      await request('PUT', '/api/keys/versioned-del', 'admin-token-1234567890abcdef', { value: 'v1' });
+      await request('DELETE', '/api/keys/versioned-del', 'admin-token-1234567890abcdef');
+
+      const versions = await request('GET', '/api/keys/versioned-del/versions', 'admin-token-1234567890abcdef');
+      expect(versions.status).toBe(200);
+      expect(Array.isArray(versions.payload)).toBe(true);
+      expect((versions.payload as unknown[]).length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('GET /search filters by ?type= and ?category=', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'search-token-one',
+        value: 'v',
+        type: 'token',
+        category: 'credentials',
+      });
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'search-apikey-two',
+        value: 'v',
+        type: 'api-key',
+        category: 'config',
+      });
+
+      const byType = await request('GET', '/api/keys/search?q=search&type=token', 'read-token-1234567890abcdef');
+      expect(byType.status).toBe(200);
+      const typeList = byType.payload as Array<{ type: string }>;
+      expect(typeList.every((e) => e.type === 'token')).toBe(true);
+      expect(typeList.some((e) => e.type === 'api-key')).toBe(false);
+
+      const byCat = await request('GET', '/api/keys/search?q=search&category=config', 'read-token-1234567890abcdef');
+      expect(byCat.status).toBe(200);
+      const catList = byCat.payload as Array<{ category: string }>;
+      expect(catList.every((e) => e.category === 'config')).toBe(true);
+
+      const noMatch = await request(
+        'GET',
+        '/api/keys/search?q=search&type=token&category=config',
+        'read-token-1234567890abcdef',
+      );
+      expect(noMatch.status).toBe(200);
+      expect((noMatch.payload as unknown[]).length).toBe(0);
+    } finally {
+      await cleanup();
+    }
+  });
+});
+
+describe.sequential('vaultRouter sprint-4 hardening: input limits, soft-delete lifecycle, search filters', () => {
+  it('rejects value longer than 32768 characters', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      const res = await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'big-val',
+        value: 'x'.repeat(32769),
+      });
+      expect(res.status).toBe(400);
+      expect(res.payload).toMatchObject({ error: 'Validation failed' });
+      const details = (res.payload as { details?: Array<{ field?: string }> }).details;
+      expect(details?.some((d) => d.field === 'value')).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('rejects update value longer than 32768 characters', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', { name: 'val-update', value: 'ok' });
+      const res = await request('PUT', '/api/keys/val-update', 'admin-token-1234567890abcdef', {
+        value: 'x'.repeat(32769),
+      });
+      expect(res.status).toBe(400);
+      const details = (res.payload as { details?: Array<{ field?: string }> }).details;
+      expect(details?.some((d) => d.field === 'value')).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('rejects tags with more than 50 items', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      const res = await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'many-tags',
+        value: 'v',
+        tags: Array.from({ length: 51 }, (_, i) => `tag-${i}`),
+      });
+      expect(res.status).toBe(400);
+      const details = (res.payload as { details?: Array<{ field?: string }> }).details;
+      expect(details?.some((d) => d.field === 'tags')).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('rejects metadata serialised to more than 16KB', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      const bigMeta: Record<string, string> = {};
+      for (let i = 0; i < 200; i++) bigMeta[`key${i}`] = 'x'.repeat(100);
+      const res = await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'big-meta',
+        value: 'v',
+        metadata: bigMeta,
+      });
+      expect(res.status).toBe(400);
+      const details = (res.payload as { details?: Array<{ field?: string }> }).details;
+      expect(details?.some((d) => d.field === 'metadata')).toBe(true);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('GET /deleted lists soft-deleted entries; POST /undelete reactivates them', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'to-undelete',
+        value: 'resurrect-me',
+        type: 'secret',
+      });
+      await request('DELETE', '/api/keys/to-undelete', 'admin-token-1234567890abcdef');
+
+      const deleted = await request('GET', '/api/keys/deleted', 'admin-token-1234567890abcdef');
+      expect(deleted.status).toBe(200);
+      const list = deleted.payload as Array<{ name: string }>;
+      expect(Array.isArray(list)).toBe(true);
+      expect(list.some((e) => e.name === 'to-undelete')).toBe(true);
+
+      const unauth = await request('GET', '/api/keys/deleted', 'read-token-1234567890abcdef');
+      expect(unauth.status).toBe(401);
+
+      const undelete = await request('POST', '/api/keys/to-undelete/undelete', 'admin-token-1234567890abcdef');
+      expect(undelete.status).toBe(200);
+      expect(undelete.payload).toMatchObject({ name: 'to-undelete' });
+
+      const restored = await request('GET', '/api/keys/to-undelete', 'read-token-1234567890abcdef');
+      expect(restored.status).toBe(200);
+      expect(restored.payload).toMatchObject({ name: 'to-undelete', value: 'resurrect-me' });
+
+      const conflict = await request('POST', '/api/keys/to-undelete/undelete', 'admin-token-1234567890abcdef');
+      expect(conflict.status).toBe(409);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('GET /versions is accessible for deleted entries', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'versioned-del',
+        value: 'v0',
+        type: 'secret',
+      });
+      await request('PUT', '/api/keys/versioned-del', 'admin-token-1234567890abcdef', { value: 'v1' });
+      await request('DELETE', '/api/keys/versioned-del', 'admin-token-1234567890abcdef');
+
+      const versions = await request('GET', '/api/keys/versioned-del/versions', 'admin-token-1234567890abcdef');
+      expect(versions.status).toBe(200);
+      expect(Array.isArray(versions.payload)).toBe(true);
+      expect((versions.payload as unknown[]).length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await cleanup();
+    }
+  });
+
+  it('GET /search filters by ?type= and ?category=', async () => {
+    const { request, cleanup } = await setupTestApp();
+    try {
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'search-token-one',
+        value: 'v',
+        type: 'token',
+        category: 'credentials',
+      });
+      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
+        name: 'search-apikey-two',
+        value: 'v',
+        type: 'api-key',
+        category: 'config',
+      });
+
+      const byType = await request('GET', '/api/keys/search?q=search&type=token', 'read-token-1234567890abcdef');
+      expect(byType.status).toBe(200);
+      const typeList = byType.payload as Array<{ type: string }>;
+      expect(typeList.every((e) => e.type === 'token')).toBe(true);
+      expect(typeList.some((e) => e.type === 'api-key')).toBe(false);
+
+      const byCat = await request('GET', '/api/keys/search?q=search&category=config', 'read-token-1234567890abcdef');
+      expect(byCat.status).toBe(200);
+      const catList = byCat.payload as Array<{ category: string }>;
+      expect(catList.every((e) => e.category === 'config')).toBe(true);
+
+      const noMatch = await request(
+        'GET',
+        '/api/keys/search?q=search&type=token&category=config',
+        'read-token-1234567890abcdef',
+      );
+      expect(noMatch.status).toBe(200);
+      expect((noMatch.payload as unknown[]).length).toBe(0);
     } finally {
       await cleanup();
     }

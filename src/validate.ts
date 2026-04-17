@@ -100,6 +100,9 @@ export function validateCreateEntry(body: Record<string, unknown>): ValidationRe
 
   if (body.value === undefined || body.value === null || body.value === '') {
     errors.push({ field: 'value', message: 'value is required' });
+  } else {
+    const valueErr = validateString(body.value, 'value', { maxLen: 32768 });
+    if (valueErr) errors.push(valueErr);
   }
 
   if (body.type !== undefined && !isVaultEntryType(body.type)) {
@@ -119,6 +122,27 @@ export function validateCreateEntry(body: Record<string, unknown>): ValidationRe
 
   const notesErr = validateString(body.notes, 'notes', { maxLen: 4000 });
   if (notesErr) errors.push(notesErr);
+
+  if (body.tags !== undefined && body.tags !== null) {
+    if (!Array.isArray(body.tags)) {
+      errors.push({ field: 'tags', message: 'tags must be an array of strings' });
+    } else if (body.tags.length > 50) {
+      errors.push({ field: 'tags', message: 'tags must contain at most 50 items' });
+    } else if (body.tags.some((t) => typeof t !== 'string')) {
+      errors.push({ field: 'tags', message: 'tags must be an array of strings' });
+    }
+  }
+
+  if (body.metadata !== undefined && body.metadata !== null) {
+    try {
+      const metaStr = typeof body.metadata === 'string' ? body.metadata : JSON.stringify(body.metadata);
+      if (metaStr.length > 16384) {
+        errors.push({ field: 'metadata', message: 'metadata must not exceed 16KB when serialized' });
+      }
+    } catch {
+      errors.push({ field: 'metadata', message: 'metadata must be a valid JSON object or string' });
+    }
+  }
 
   const dateErr = validateDate(body.expires_at, 'expires_at');
   if (dateErr) errors.push(dateErr);
@@ -159,6 +183,9 @@ export function validateUpdateEntry(body: Record<string, unknown>): ValidationRe
 
   if (body.value !== undefined && (body.value === null || body.value === '')) {
     errors.push({ field: 'value', message: 'value cannot be set to empty on update' });
+  } else if (body.value !== undefined) {
+    const valueErr = validateString(body.value, 'value', { maxLen: 32768 });
+    if (valueErr) errors.push(valueErr);
   }
 
   if (body.type !== undefined && !isVaultEntryType(body.type)) {
@@ -173,6 +200,27 @@ export function validateUpdateEntry(body: Record<string, unknown>): ValidationRe
 
   const notesErr = body.notes !== undefined ? validateString(body.notes, 'notes', { maxLen: 4000 }) : null;
   if (notesErr) errors.push(notesErr);
+
+  if (body.tags !== undefined && body.tags !== null) {
+    if (!Array.isArray(body.tags)) {
+      errors.push({ field: 'tags', message: 'tags must be an array of strings' });
+    } else if (body.tags.length > 50) {
+      errors.push({ field: 'tags', message: 'tags must contain at most 50 items' });
+    } else if (body.tags.some((t) => typeof t !== 'string')) {
+      errors.push({ field: 'tags', message: 'tags must be an array of strings' });
+    }
+  }
+
+  if (body.metadata !== undefined && body.metadata !== null) {
+    try {
+      const metaStr = typeof body.metadata === 'string' ? body.metadata : JSON.stringify(body.metadata);
+      if (metaStr.length > 16384) {
+        errors.push({ field: 'metadata', message: 'metadata must not exceed 16KB when serialized' });
+      }
+    } catch {
+      errors.push({ field: 'metadata', message: 'metadata must be a valid JSON object or string' });
+    }
+  }
 
   const dateErr = validateDate(body.expires_at, 'expires_at');
   if (dateErr) errors.push(dateErr);

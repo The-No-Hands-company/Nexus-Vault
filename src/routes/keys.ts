@@ -180,6 +180,11 @@ vaultRouter.get('/stats', requireReadToken, (_req, res) => {
   });
 });
 
+vaultRouter.get('/deleted', requireAdminToken, (_req, res) => {
+  const collectionMap = buildCollectionMap();
+  res.json(entryQueries.getDeleted.all().map((e) => safeEntry(e, collectionMap)));
+});
+
 vaultRouter.get('/expiring', requireAdminToken, (req, res) => {
   const days = parseInt(req.query.days as string ?? '7', 10);
   const cutoff = new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
@@ -188,8 +193,13 @@ vaultRouter.get('/expiring', requireAdminToken, (req, res) => {
 });
 
 vaultRouter.get('/search', requireReadToken, (req, res) => {
-  const q = `%${req.query.q ?? ''}%`;
-  const rows = entryQueries.search.all(q, q, q, q);
+  const rawQ = String(req.query.q ?? '').trim();
+  const q = `%${rawQ}%`;
+  let rows = entryQueries.search.all(q, q, q, q);
+  const typeFilter = typeof req.query.type === 'string' ? req.query.type.trim() : '';
+  const categoryFilter = typeof req.query.category === 'string' ? req.query.category.trim() : '';
+  if (typeFilter) rows = rows.filter((e) => e.type === typeFilter);
+  if (categoryFilter) rows = rows.filter((e) => e.category === categoryFilter);
   res.json(rows.map((e) => safeEntry(e, buildCollectionMap())));
 });
 
@@ -223,14 +233,14 @@ vaultRouter.get('/export', requireAdminToken, (_req, res) => {
 });
 
 vaultRouter.get('/:name/versions', requireAdminToken, (req, res) => {
-  const row = entryQueries.getByName.get(req.params.name);
+  const row = entryQueries.getByNameAny.get(req.params.name);
   if (!row) return res.status(404).json({ error: `Entry "${req.params.name}" not found` });
   const versions = versionQueries.getByName.all(row.name);
   res.json(versions);
 });
 
 vaultRouter.get('/:name/versions/:version', requireAdminToken, (req, res) => {
-  const row = entryQueries.getByName.get(req.params.name);
+  const row = entryQueries.getByNameAny.get(req.params.name);
   if (!row) return res.status(404).json({ error: `Entry "${req.params.name}" not found` });
   const ver = parseInt(req.params.version, 10);
   if (isNaN(ver) || ver < 1) return res.status(400).json({ error: 'Invalid version number' });
@@ -426,6 +436,17 @@ vaultRouter.delete('/:name', requireAdminToken, (req, res) => {
   entryQueries.softDelete.run(row.id);
   logAudit(row.name, 'DELETE', clientIp(req), req.headers['user-agent'] ?? '');
   res.json({ ok: true });
+});
+
+vaultRouter.post('/:name/undelete', requireAdminToken, (req, res) => {
+  const row = entryQueries.getByNameAny.get(req.params.name);
+  if (!row) return res.status(404).json({ error: `Entry "${req.params.name}" not found` });
+  if (row.is_active === 1) return res.status(409).json({ error: 'Entry is not deleted' });
+  entryQueries.reactivate.run(row.id);
+  logAudit(row.name, 'UNDELETE', clientIp(req), req.headers['user-agent'] ?? '');
+  const updated = entryQueries.getByName.get(row.name)!;
+  const collectionMap = buildCollectionMap();
+  res.json(safeEntry(updated, collectionMap));
 });
 
 vaultRouter.post('/import', requireAdminToken, (req, res) => {

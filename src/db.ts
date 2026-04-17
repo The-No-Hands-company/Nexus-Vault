@@ -500,6 +500,7 @@ export const entryQueries = {
   getPage: db.prepare<[number, number], VaultEntry>(`SELECT * FROM vault_entries WHERE is_active = 1 ORDER BY type, category, project, name LIMIT ? OFFSET ?`),
   getCount: db.prepare<[], { count: number }>(`SELECT COUNT(*) as count FROM vault_entries WHERE is_active = 1`),
   getByName: db.prepare<[string], VaultEntry>(`SELECT * FROM vault_entries WHERE name = ? AND is_active = 1`),
+  getByNameAny: db.prepare<[string], VaultEntry>(`SELECT * FROM vault_entries WHERE name = ?`),
   getById: db.prepare<[number], VaultEntry>(`SELECT * FROM vault_entries WHERE id = ? AND is_active = 1`),
   getByType: db.prepare<[VaultEntryType], VaultEntry>(`SELECT * FROM vault_entries WHERE type = ? AND is_active = 1 ORDER BY category, project, name`),
   getByCategory: db.prepare<[VaultCategory], VaultEntry>(`SELECT * FROM vault_entries WHERE category = ? AND is_active = 1 ORDER BY type, project, name`),
@@ -571,6 +572,12 @@ export const entryQueries = {
   ),
   softDelete: db.prepare<[number], void>(
     `UPDATE vault_entries SET is_active = 0, updated_at = datetime('now') WHERE id = ?`
+  ),
+  reactivate: db.prepare<[number], void>(
+    `UPDATE vault_entries SET is_active = 1, updated_at = datetime('now') WHERE id = ?`
+  ),
+  getDeleted: db.prepare<[], VaultEntry>(
+    `SELECT * FROM vault_entries WHERE is_active = 0 ORDER BY updated_at DESC`
   ),
   getExpiringSoon: db.prepare<[string], VaultEntry>(
     `SELECT * FROM vault_entries
