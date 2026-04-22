@@ -12,6 +12,60 @@ It combines the former API-key registry and devvault-style secret storage into o
 - `card`
 - general `secret`
 
+## Runtime
+
+Nexus Vault is verified to build and run on Node `24`.
+
+If you use `nvm`, the repository now includes `.nvmrc`, so you can select the expected runtime with:
+
+```bash
+nvm use
+```
+
+If Node `24` is not installed yet:
+
+```bash
+nvm install 24
+nvm use 24
+```
+
+## Startup
+
+1. Create a local env file with at least these required values:
+
+```bash
+VAULT_MASTER_SECRET=<long-random-secret>
+VAULT_ACCESS_TOKEN=<read-token>
+VAULT_ADMIN_TOKEN=<admin-token>
+```
+
+2. Install dependencies and build:
+
+```bash
+npm install
+npm run build
+```
+
+3. Start the server with your existing env file:
+
+```bash
+set -a && . ./.env.local && set +a
+node dist/index.js
+```
+
+Default port is `3900`. If that port is already in use, override it before starting:
+
+```bash
+set -a && . ./.env.local && set +a
+PORT=3901 node dist/index.js
+```
+
+Quick health check:
+
+```bash
+curl http://127.0.0.1:3900/api/health
+```
+
 ## Core features
 
 - AES-256-GCM encrypted storage
