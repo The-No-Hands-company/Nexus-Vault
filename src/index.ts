@@ -2,6 +2,7 @@ import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
+import fs from 'fs';
 import path from 'path';
 import { writeLimit } from './rate-limits.js';
 import type { CorsOptions } from 'cors';
@@ -200,8 +201,24 @@ app.use((req, res, next) => {
   next();
 });
 
-const __dirname = path.dirname(process.argv[1] ?? '');
-app.use(express.static(path.join(__dirname, 'public')));
+function resolvePublicDir(): string {
+  const currentDir = process.cwd();
+  const candidates = [
+    path.join(currentDir, 'dist', 'public'),
+    path.join(currentDir, 'src', 'public'),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(path.join(candidate, 'index.html'))) {
+      return candidate;
+    }
+  }
+
+  return candidates[0];
+}
+
+const publicDir = resolvePublicDir();
+app.use(express.static(publicDir));
 
 app.use('/api/keys', writeLimit, vaultRouter);
 app.use('/api/audit', auditRouter);
@@ -246,7 +263,7 @@ app.get('/api/ready', (_req, res) => {
 });
 
 app.get('*', (_req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+  res.sendFile(path.join(publicDir, 'index.html'));
 });
 
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
