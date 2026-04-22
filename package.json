@@ -1,6 +1,7 @@
 {
   "name": "nexus-vault",
   "version": "0.1.0",
+  "type": "module",
   "description": "Self-hosted, encrypted API key management with audit logs — part of the Nexus ecosystem",
   "main": "dist/index.js",
   "scripts": {
