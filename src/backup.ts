@@ -2,6 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { db } from './db.js';
+import { syncBackupToCloud } from './backup-sync.js';
 
 function timestampForFilename(date: Date): string {
   return date.toISOString().replace(/[:]/g, '-').replace(/[.]/g, '_');
@@ -22,6 +23,16 @@ async function main() {
 
   console.log(`[vault] Backup written to ${outputPath}`);
   console.log(`[vault] SHA256 checksum written to ${checksumPath}`);
+
+  const sync = await syncBackupToCloud(outputPath);
+  if (sync.uploaded) {
+    console.log(`[vault] Cloud sync: uploaded to s3://${sync.bucket}/${sync.key}`);
+  } else if (sync.skipped) {
+    console.log('[vault] Cloud sync: skipped (VAULT_BACKUP_S3_BUCKET not set)');
+  } else {
+    console.error(`[vault] Cloud sync: failed — ${sync.error}`);
+    process.exit(1);
+  }
 }
 
 main().catch((err) => {

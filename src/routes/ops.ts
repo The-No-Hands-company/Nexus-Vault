@@ -1,4 +1,6 @@
 import { Router } from 'express';
+import path from 'path';
+import { strictLimit } from '../rate-limits.js';
 import { getTokenStateSummary, requireAdminToken, rotateTokensAtomic } from '../auth.js';
 import { getDatabaseMaintenanceState, logAudit, runDatabaseMaintenance } from '../db.js';
 import {
@@ -17,6 +19,7 @@ import {
 } from '../ops.js';
 import { getRuntimeState, setMaintenanceMode, setRestoreInProgress } from '../runtime-state.js';
 import { incCounter } from '../metrics.js';
+import { syncBackupToCloud } from '../backup-sync.js';
 
 export const opsRouter = Router();
 
@@ -46,7 +49,7 @@ opsRouter.get('/tokens/state', requireAdminToken, (_req, res) => {
   res.json({ state: getTokenStateSummary() });
 });
 
-opsRouter.post('/tokens/rotate', requireAdminToken, (req, res) => {
+opsRouter.post('/tokens/rotate', requireAdminToken, strictLimit, (req, res) => {
   try {
     const mode = req.body?.mode === 'append' ? 'append' : 'replace';
     const accessTokens = Array.isArray(req.body?.accessTokens)
@@ -214,11 +217,13 @@ opsRouter.post('/backups/create', requireAdminToken, async (req, res) => {
     }
     const created = await createBackup(filename, encryption ? { encryption } : undefined);
     const retention = enforceBackupRetention();
+    const backupFullPath = path.join(backupDirPath(), created.filename);
+    const sync = await syncBackupToCloud(backupFullPath);
     incCounter('vault_ops_backup_create_total', 'Total backup create operations', 1, {
       result: 'ok',
       encrypted: created.encrypted,
     });
-    res.status(201).json({ ok: true, created, retention });
+    res.status(201).json({ ok: true, created, retention, cloudSync: sync });
   } catch (err) {
     incCounter('vault_ops_backup_create_total', 'Total backup create operations', 1, {
       result: 'failed',
@@ -340,7 +345,7 @@ opsRouter.put('/backups/upload', async (req, res) => {
   }
 });
 
-opsRouter.post('/backups/restore', requireAdminToken, (req, res) => {
+opsRouter.post('/backups/restore', requireAdminToken, strictLimit, (req, res) => {
   if (getRuntimeState().restoreInProgress) {
     res.status(409).json({ error: 'A restore operation is already in progress' });
     return;

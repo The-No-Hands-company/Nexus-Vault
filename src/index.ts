@@ -3,6 +3,7 @@ import helmet from 'helmet';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
 import path from 'path';
+import { writeLimit } from './rate-limits.js';
 import type { CorsOptions } from 'cors';
 import { getAuditChainStatus, recordAuditVerificationRun, verifyAuditChain } from './db.js';
 import { startPeriodicVerification, getLastVerificationResult, stopPeriodicVerification } from './periodic-verify.js';
@@ -174,12 +175,6 @@ app.use(rateLimit({
   message: { error: 'Too many requests' },
 }));
 
-const writeLimit = rateLimit({
-  windowMs: 60_000,
-  max: 30,
-  message: { error: 'Too many write requests' },
-});
-
 app.use(express.json({ limit: '64kb' }));
 app.use(httpObservabilityMiddleware);
 app.use(requestLoggingMiddleware);
@@ -210,7 +205,7 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 app.use('/api/keys', writeLimit, vaultRouter);
 app.use('/api/audit', auditRouter);
-app.use('/api/ops', opsRouter);
+app.use('/api/ops', writeLimit, opsRouter);
 app.use('/api/config', configRouter);
 app.use('/api', metricsRouter);
 app.use('/', cloudRouter);

@@ -286,8 +286,8 @@ vaultRouter.post('/:name/restore/:version', requireAdminToken, (req, res) => {
   const newValueEnc = encrypt(decrypted, MASTER);
   entryQueries.update.run({
     id: row.id,
-    type: archived.type,
-    category: archived.category,
+    type: archived.type as VaultEntryType,
+    category: archived.category as VaultCategory,
     value_enc: newValueEnc,
     tags: archived.tags,
     notes: archived.notes,
