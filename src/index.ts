@@ -18,6 +18,7 @@ import { getRuntimeState, isWriteBlocked } from './runtime-state.js';
 import { metricsRouter } from './routes/metrics.js';
 import { httpObservabilityMiddleware } from './observability.js';
 import { logger, requestLoggingMiddleware } from './logger.js';
+import { hasVaultCloudSystemsApiIntegration, startNexusVaultCloudRegistrationHeartbeat } from './integrations/nexus-cloud.js';
 
 const required = ['VAULT_ACCESS_TOKEN', 'VAULT_ADMIN_TOKEN', 'VAULT_MASTER_SECRET'];
 for (const v of required) {
@@ -161,6 +162,7 @@ const PORT = parseInt(process.env.PORT ?? '3900', 10);
 const app = express();
 let isReady = false;
 let isDraining = false;
+let stopCloudHeartbeat: (() => void) | null = null;
 
 app.set('trust proxy', resolveTrustProxy());
 
@@ -283,6 +285,10 @@ const verificationTimer = startPeriodicVerification();
 const server = app.listen(PORT, () => {
   isReady = true;
   logger.info('startup.http_listen', { port: PORT, url: `http://localhost:${PORT}` });
+
+  if (hasVaultCloudSystemsApiIntegration()) {
+    stopCloudHeartbeat = startNexusVaultCloudRegistrationHeartbeat(PORT);
+  }
 });
 
 function beginGracefulShutdown(signal: string): void {
@@ -292,6 +298,7 @@ function beginGracefulShutdown(signal: string): void {
 
   logger.info('shutdown.begin', { signal });
   stopPeriodicVerification(verificationTimer);
+  stopCloudHeartbeat?.();
 
   const forceMs = Math.max(1000, parseInt(process.env.VAULT_SHUTDOWN_TIMEOUT_MS ?? '15000', 10));
   const forceTimer = setTimeout(() => {
