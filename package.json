@@ -16,7 +16,10 @@
     "rotate-secret": "tsx src/rotate-master-secret.ts",
     "audit:verify": "tsx src/audit-verify.ts",
     "security:audit": "npm audit --omit=dev --audit-level=high",
-    "release:check": "npm run typecheck && npm test && npm run build && npm pack --dry-run"
+    "lint": "biome check src",
+    "format": "biome check --write src",
+    "check": "npm run typecheck && npm run lint",
+    "release:check": "npm run check && npm test && npm run build && npm pack --dry-run"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1034.0",
@@ -28,6 +31,7 @@
     "nodemailer": "^8.0.5"
   },
   "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
     "@types/better-sqlite3": "^7.6.8",
     "@types/cors": "^2.8.17",
     "@types/express": "^4.17.21",
