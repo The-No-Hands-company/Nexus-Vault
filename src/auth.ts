@@ -129,16 +129,109 @@ export function getTokenStateSummary(): { accessCount: number; adminCount: numbe
   };
 }
 
-/** Read-only access — for projects pulling keys at runtime */
-export function requireReadToken(req: Request, res: Response, next: NextFunction) {
+/*
+ * Two kinds of caller, deliberately kept distinct.
+ *
+ * VAULT_ACCESS_TOKEN / VAULT_ADMIN_TOKEN are *service* credentials — the thing a
+ * deployed project presents when it pulls its keys at boot. They are not user
+ * accounts and are not replaced by single sign-on; removing them would break the
+ * vault's actual job.
+ *
+ * People are different. A human opening the dashboard should not be handed a
+ * long-lived shared secret, and should not have to hold a second account just
+ * for this app. Nexus-Auth is the ecosystem's identity service, so a valid
+ * session from it is accepted too — the same cookie that already signs you in to
+ * Nexus-Deploy.
+ *
+ * Role matters here in a way it does not for other apps: this is a secrets
+ * store, so "any authenticated ecosystem user" is far too broad. Reading keys
+ * requires an operator-or-above role, administering them requires admin-or-above.
+ * Both lists are configurable for operators who organise roles differently.
+ *
+ * Order is deliberate: the static-token comparison is local and constant-time,
+ * so machine callers on the hot path never wait on a network round trip. Only a
+ * session credential reaches out to Nexus-Auth.
+ */
+const NEXUS_AUTH_URL = (process.env.NEXUS_AUTH_URL ?? 'http://localhost:4310').replace(/\/+$/, '');
+const NEXUS_AUTH_TIMEOUT_MS = Number(process.env.NEXUS_AUTH_TIMEOUT_MS ?? 5000);
+const SESSION_COOKIE = 'nexus_session';
+
+function parseRoles(envName: string, fallback: string): Set<string> {
+  const raw = (process.env[envName] ?? fallback).trim();
+  return new Set(raw.split(',').map((r) => r.trim().toLowerCase()).filter(Boolean));
+}
+
+const SSO_READ_ROLES = parseRoles('VAULT_SSO_READ_ROLES', 'founder,admin,operator');
+const SSO_ADMIN_ROLES = parseRoles('VAULT_SSO_ADMIN_ROLES', 'founder,admin');
+const SSO_ENABLED = (process.env.VAULT_SSO_ENABLED ?? 'true').toLowerCase() !== 'false';
+
+function extractSessionCookie(req: Request): string | null {
+  const header = req.headers.cookie;
+  if (!header) return null;
+  for (const part of header.split(';')) {
+    const eq = part.indexOf('=');
+    if (eq === -1) continue;
+    if (part.slice(0, eq).trim() === SESSION_COOKIE) {
+      return decodeURIComponent(part.slice(eq + 1).trim()) || null;
+    }
+  }
+  return null;
+}
+
+type NexusAuthUser = { id?: string; username?: string; role?: string };
+
+async function resolveNexusAuthUser(credential: string): Promise<NexusAuthUser | null> {
+  try {
+    const response = await fetch(`${NEXUS_AUTH_URL}/api/v1/auth/check`, {
+      headers: { Authorization: `Bearer ${credential}`, Accept: 'application/json' },
+      signal: AbortSignal.timeout(NEXUS_AUTH_TIMEOUT_MS),
+    });
+    if (!response.ok) return null;
+    const body = (await response.json().catch(() => null)) as
+      | { authorized?: boolean; userId?: string; user?: NexusAuthUser }
+      | null;
+    if (!body?.authorized || !body.userId) return null;
+    return body.user ?? { id: body.userId };
+  } catch {
+    return null;
+  }
+}
+
+async function ssoRoleAllows(req: Request, allowed: Set<string>): Promise<boolean> {
+  if (!SSO_ENABLED) return false;
+  // A browser cannot set Authorization on a navigation, so the cookie is the
+  // credential that actually arrives from the dashboard.
+  const credential = extractSessionCookie(req) ?? extractBearer(req);
+  if (!credential) return false;
+  const user = await resolveNexusAuthUser(credential);
+  if (!user) return false;
+  return allowed.has(String(user.role ?? '').toLowerCase());
+}
+
+/** Read-only access — service tokens for projects pulling keys, or an SSO session */
+export async function requireReadToken(req: Request, res: Response, next: NextFunction): Promise<void> {
   const token = extractBearer(req);
-  if (tokenMatches(token, tokenState.accessDigests) || tokenMatches(token, tokenState.adminDigests)) return next();
+  if (tokenMatches(token, tokenState.accessDigests) || tokenMatches(token, tokenState.adminDigests)) {
+    next();
+    return;
+  }
+  if (await ssoRoleAllows(req, SSO_READ_ROLES)) {
+    next();
+    return;
+  }
   res.status(401).json({ error: 'Unauthorized' });
 }
 
-/** Admin access — for creating, updating, deleting keys via dashboard/API */
-export function requireAdminToken(req: Request, res: Response, next: NextFunction) {
+/** Admin access — creating, updating, deleting keys via dashboard/API */
+export async function requireAdminToken(req: Request, res: Response, next: NextFunction): Promise<void> {
   const token = extractBearer(req);
-  if (tokenMatches(token, tokenState.adminDigests)) return next();
-  res.status(401).json({ error: 'Unauthorized — admin token required' });
+  if (tokenMatches(token, tokenState.adminDigests)) {
+    next();
+    return;
+  }
+  if (await ssoRoleAllows(req, SSO_ADMIN_ROLES)) {
+    next();
+    return;
+  }
+  res.status(401).json({ error: 'Unauthorized — admin token or an admin Nexus-Auth session required' });
 }
