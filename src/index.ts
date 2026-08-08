@@ -1,3 +1,6 @@
+// Must stay the first import: modules below read VAULT_* at import time.
+import './load-env.js';
+
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
