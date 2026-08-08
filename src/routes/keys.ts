@@ -48,7 +48,7 @@ vaultRouter.get('/', requireReadToken, (req, res) => {
   const offset = (page - 1) * limit;
   const collectionMap = buildCollectionMap();
   if (req.query.page === undefined && req.query.limit === undefined) {
-    return res.json(entryQueries.getAll.all().map((e) => safeEntry(e, collectionMap)));
+    res.json(entryQueries.getAll.all().map((e) => safeEntry(e, collectionMap)));
   }
   const total = entryQueries.getCount.get()!.count;
   const entries = entryQueries.getPage.all(limit, offset).map((e) => safeEntry(e, collectionMap));
@@ -94,14 +94,20 @@ vaultRouter.get('/collections', requireReadToken, (_req, res) => {
 });
 
 vaultRouter.get('/collections/:name', requireReadToken, (req, res) => {
-  const collection = collectionQueries.getByName.get(req.params.name);
-  if (!collection) return res.status(404).json({ error: 'Collection not found' });
+  const collection = collectionQueries.getByName.get(req.params.name!);
+  if (!collection) {
+    res.status(404).json({ error: 'Collection not found' });
+    return;
+  }
   res.json(collection);
 });
 
 vaultRouter.get('/collections/:name/entries', requireReadToken, (req, res) => {
-  const collection = collectionQueries.getByName.get(req.params.name);
-  if (!collection) return res.status(404).json({ error: 'Collection not found' });
+  const collection = collectionQueries.getByName.get(req.params.name!);
+  if (!collection) {
+    res.status(404).json({ error: 'Collection not found' });
+    return;
+  }
   const entries = entryQueries.getByCollection.all(collection.id);
   res.json(entries.map((e) => safeEntry(e, new Map([[collection.id, collection.name]]))));
 });
@@ -109,11 +115,15 @@ vaultRouter.get('/collections/:name/entries', requireReadToken, (req, res) => {
 vaultRouter.post('/collections', requireAdminToken, (req, res) => {
   const body = readBody(req);
   const validated = validateCreateCollection(body);
-  if (!validated.ok) return sendValidationError(res, validated.errors);
+  if (!validated.ok) {
+    sendValidationError(res, validated.errors);
+    return;
+  }
   const v = validated.value;
   const parent = v.parentName ? collectionQueries.getByName.get(v.parentName) : null;
   if (v.parentName && !parent) {
-    return res.status(400).json({ error: `Parent collection "${v.parentName}" not found` });
+    res.status(400).json({ error: `Parent collection "${v.parentName}" not found` });
+    return;
   }
   collectionQueries.upsert.run({
     name: v.name,
@@ -127,21 +137,28 @@ vaultRouter.post('/collections', requireAdminToken, (req, res) => {
 });
 
 vaultRouter.put('/collections/:name', requireAdminToken, (req, res) => {
-  const existing = collectionQueries.getByName.get(req.params.name);
-  if (!existing) return res.status(404).json({ error: 'Collection not found' });
+  const existing = collectionQueries.getByName.get(req.params.name!);
+  if (!existing) {
+    res.status(404).json({ error: 'Collection not found' });
+    return;
+  }
   const body = readBody(req);
   // Treat PUT /collections/:name as a partial update — only name is truly required for upsert
   const rawName = body.name !== undefined ? body.name : existing.name;
   const tempBody = { ...body, name: rawName };
   const validated = validateCreateCollection(tempBody as Record<string, unknown>);
-  if (!validated.ok) return sendValidationError(res, validated.errors);
+  if (!validated.ok) {
+    sendValidationError(res, validated.errors);
+    return;
+  }
   const v = validated.value;
   const parentName = body.parentName !== undefined
     ? (body.parentName ? String(body.parentName) : null)
     : (existing.parent_id ? collectionQueries.getById.get(existing.parent_id)?.name ?? null : null);
   const parent = parentName ? collectionQueries.getByName.get(parentName) : null;
   if (parentName && !parent) {
-    return res.status(400).json({ error: `Parent collection "${parentName}" not found` });
+    res.status(400).json({ error: `Parent collection "${parentName}" not found` });
+    return;
   }
   collectionQueries.update.run({
     id: existing.id,
@@ -156,10 +173,16 @@ vaultRouter.put('/collections/:name', requireAdminToken, (req, res) => {
 });
 
 vaultRouter.delete('/collections/:name', requireAdminToken, (req, res) => {
-  const nameErr = validateCollectionName(req.params.name, 'name');
-  if (nameErr) return sendValidationError(res, [nameErr]);
-  const existing = collectionQueries.getByName.get(req.params.name);
-  if (!existing) return res.status(404).json({ error: 'Collection not found' });
+  const nameErr = validateCollectionName(req.params.name!, 'name');
+  if (nameErr) {
+    sendValidationError(res, [nameErr]);
+    return;
+  }
+  const existing = collectionQueries.getByName.get(req.params.name!);
+  if (!existing) {
+    res.status(404).json({ error: 'Collection not found' });
+    return;
+  }
   collectionQueries.softDelete.run(existing.id);
   res.json({ ok: true });
 });
@@ -233,40 +256,63 @@ vaultRouter.get('/export', requireAdminToken, (_req, res) => {
 });
 
 vaultRouter.get('/:name/versions', requireAdminToken, (req, res) => {
-  const row = entryQueries.getByNameAny.get(req.params.name);
-  if (!row) return res.status(404).json({ error: `Entry "${req.params.name}" not found` });
+  const row = entryQueries.getByNameAny.get(req.params.name!);
+  if (!row) {
+    res.status(404).json({ error: `Entry "${req.params.name}" not found` });
+    return;
+  }
   const versions = versionQueries.getByName.all(row.name);
   res.json(versions);
 });
 
 vaultRouter.get('/:name/versions/:version', requireAdminToken, (req, res) => {
-  const row = entryQueries.getByNameAny.get(req.params.name);
-  if (!row) return res.status(404).json({ error: `Entry "${req.params.name}" not found` });
-  const ver = parseInt(req.params.version, 10);
-  if (isNaN(ver) || ver < 1) return res.status(400).json({ error: 'Invalid version number' });
+  const row = entryQueries.getByNameAny.get(req.params.name!);
+  if (!row) {
+    res.status(404).json({ error: `Entry "${req.params.name}" not found` });
+    return;
+  }
+  const ver = parseInt(req.params.version!, 10);
+  if (isNaN(ver) || ver < 1) {
+    res.status(400).json({ error: 'Invalid version number' });
+    return;
+  }
   const version = versionQueries.getByVersion.get(row.name, ver);
-  if (!version) return res.status(404).json({ error: `Version ${ver} not found` });
+  if (!version) {
+    res.status(404).json({ error: `Version ${ver} not found` });
+    return;
+  }
   let value: string;
   try {
     value = decrypt(version.value_enc, MASTER);
   } catch {
-    return res.status(500).json({ error: 'Failed to decrypt archived version' });
+    res.status(500).json({ error: 'Failed to decrypt archived version' });
+    return;
   }
   res.json({ ...version, value_enc: undefined, value });
 });
 
 vaultRouter.post('/:name/restore/:version', requireAdminToken, (req, res) => {
-  const row = entryQueries.getByName.get(req.params.name);
-  if (!row) return res.status(404).json({ error: `Entry "${req.params.name}" not found` });
-  const ver = parseInt(req.params.version, 10);
-  if (isNaN(ver) || ver < 1) return res.status(400).json({ error: 'Invalid version number' });
+  const row = entryQueries.getByName.get(req.params.name!);
+  if (!row) {
+    res.status(404).json({ error: `Entry "${req.params.name}" not found` });
+    return;
+  }
+  const ver = parseInt(req.params.version!, 10);
+  if (isNaN(ver) || ver < 1) {
+    res.status(400).json({ error: 'Invalid version number' });
+    return;
+  }
   const archived = versionQueries.getByVersion.get(row.name, ver);
-  if (!archived) return res.status(404).json({ error: `Version ${ver} not found` });
+  if (!archived) {
+    res.status(404).json({ error: `Version ${ver} not found` });
+    return;
+  }
   let decrypted: string;
   try {
     decrypted = decrypt(archived.value_enc, MASTER);
   } catch {
-    return res.status(500).json({ error: 'Failed to decrypt archived version' });
+    res.status(500).json({ error: 'Failed to decrypt archived version' });
+    return;
   }
   // Archive the current value before overwriting
   const currentVersion = versionQueries.countByName.get(row.name)?.count ?? 0;
@@ -301,18 +347,23 @@ vaultRouter.post('/:name/restore/:version', requireAdminToken, (req, res) => {
 });
 
 vaultRouter.get('/:name', requireReadToken, (req, res) => {
-  const row = entryQueries.getByName.get(req.params.name);
-  if (!row) return res.status(404).json({ error: `Entry "${req.params.name}" not found` });
+  const row = entryQueries.getByName.get(req.params.name!);
+  if (!row) {
+    res.status(404).json({ error: `Entry "${req.params.name}" not found` });
+    return;
+  }
   if (row.expires_at && new Date(row.expires_at) < new Date()) {
     logAudit(row.name, 'READ_EXPIRED', clientIp(req), req.headers['user-agent'] ?? '');
-    return res.status(410).json({ error: 'Entry has expired', expiredAt: row.expires_at });
+    res.status(410).json({ error: 'Entry has expired', expiredAt: row.expires_at });
+    return;
   }
   let value: string;
   try {
     value = decrypt(row.value_enc, MASTER);
   } catch {
     logAudit(row.name, 'DECRYPT_ERROR', clientIp(req), req.headers['user-agent'] ?? '');
-    return res.status(500).json({ error: 'Failed to decrypt — wrong master secret?' });
+    res.status(500).json({ error: 'Failed to decrypt — wrong master secret?' });
+    return;
   }
   entryQueries.recordAccess.run(row.name);
   logAudit(row.name, 'READ', clientIp(req), req.headers['user-agent'] ?? '');
@@ -333,7 +384,10 @@ vaultRouter.get('/:name', requireReadToken, (req, res) => {
 vaultRouter.post('/', requireAdminToken, (req, res) => {
   const body = readBody(req);
   const validated = validateCreateEntry(body);
-  if (!validated.ok) return sendValidationError(res, validated.errors);
+  if (!validated.ok) {
+    sendValidationError(res, validated.errors);
+    return;
+  }
   const v = validated.value;
 
   const type = normalizeVaultEntryType(v.type);
@@ -341,7 +395,8 @@ vaultRouter.post('/', requireAdminToken, (req, res) => {
   const tags = serializeTags(v.tags ?? []);
   const collection = v.collection ? collectionQueries.getByName.get(v.collection) : null;
   if (v.collection && !collection) {
-    return res.status(400).json({ error: `Collection "${v.collection}" not found` });
+    res.status(400).json({ error: `Collection "${v.collection}" not found` });
+    return;
   }
 
   try {
@@ -362,20 +417,30 @@ vaultRouter.post('/', requireAdminToken, (req, res) => {
     res.status(201).json({ ok: true, name: v.name, type, category });
   } catch (err: any) {
     if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
-      return res.status(409).json({ error: `Entry "${v.name}" already exists — use PUT to update` });
+      res.status(409).json({ error: `Entry "${v.name}" already exists — use PUT to update` });
+      return;
     }
     throw err;
   }
 });
 
 vaultRouter.put('/:name', requireAdminToken, (req, res) => {
-  const nameErr = validateEntryName(req.params.name);
-  if (nameErr) return sendValidationError(res, [nameErr]);
-  const row = entryQueries.getByName.get(req.params.name);
-  if (!row) return res.status(404).json({ error: 'Entry not found' });
+  const nameErr = validateEntryName(req.params.name!);
+  if (nameErr) {
+    sendValidationError(res, [nameErr]);
+    return;
+  }
+  const row = entryQueries.getByName.get(req.params.name!);
+  if (!row) {
+    res.status(404).json({ error: 'Entry not found' });
+    return;
+  }
   const body = readBody(req);
   const validated = validateUpdateEntry(body);
-  if (!validated.ok) return sendValidationError(res, validated.errors);
+  if (!validated.ok) {
+    sendValidationError(res, validated.errors);
+    return;
+  }
   const v = validated.value;
 
   const type = v.type ?? row.type;
@@ -383,7 +448,8 @@ vaultRouter.put('/:name', requireAdminToken, (req, res) => {
   const collectionName = v.collection !== undefined ? v.collection : null;
   const collection = collectionName ? collectionQueries.getByName.get(collectionName) : null;
   if (collectionName && !collection) {
-    return res.status(400).json({ error: `Collection "${collectionName}" not found` });
+    res.status(400).json({ error: `Collection "${collectionName}" not found` });
+    return;
   }
   const value_enc = v.value ? encrypt(v.value, MASTER) : row.value_enc;
   const currentVersion = versionQueries.countByName.get(row.name)?.count ?? 0;
@@ -416,10 +482,16 @@ vaultRouter.put('/:name', requireAdminToken, (req, res) => {
 });
 
 vaultRouter.delete('/:name', requireAdminToken, (req, res) => {
-  const nameErr = validateEntryName(req.params.name);
-  if (nameErr) return sendValidationError(res, [nameErr]);
-  const row = entryQueries.getByName.get(req.params.name);
-  if (!row) return res.status(404).json({ error: 'Entry not found' });
+  const nameErr = validateEntryName(req.params.name!);
+  if (nameErr) {
+    sendValidationError(res, [nameErr]);
+    return;
+  }
+  const row = entryQueries.getByName.get(req.params.name!);
+  if (!row) {
+    res.status(404).json({ error: 'Entry not found' });
+    return;
+  }
   const currentVersion = versionQueries.countByName.get(row.name)?.count ?? 0;
   versionQueries.insert.run({
     entry_name: row.name,
@@ -439,9 +511,15 @@ vaultRouter.delete('/:name', requireAdminToken, (req, res) => {
 });
 
 vaultRouter.post('/:name/undelete', requireAdminToken, (req, res) => {
-  const row = entryQueries.getByNameAny.get(req.params.name);
-  if (!row) return res.status(404).json({ error: `Entry "${req.params.name}" not found` });
-  if (row.is_active === 1) return res.status(409).json({ error: 'Entry is not deleted' });
+  const row = entryQueries.getByNameAny.get(req.params.name!);
+  if (!row) {
+    res.status(404).json({ error: `Entry "${req.params.name}" not found` });
+    return;
+  }
+  if (row.is_active === 1) {
+    res.status(409).json({ error: 'Entry is not deleted' });
+    return;
+  }
   entryQueries.reactivate.run(row.id);
   logAudit(row.name, 'UNDELETE', clientIp(req), req.headers['user-agent'] ?? '');
   const updated = entryQueries.getByName.get(row.name)!;
@@ -452,7 +530,10 @@ vaultRouter.post('/:name/undelete', requireAdminToken, (req, res) => {
 vaultRouter.post('/import', requireAdminToken, (req, res) => {
   const body = readBody(req);
   const validated = validateImportDocument(body);
-  if (!validated.ok) return sendValidationError(res, validated.errors);
+  if (!validated.ok) {
+    sendValidationError(res, validated.errors);
+    return;
+  }
   const { collections, entries, replaceExisting } = validated.value;
   if (replaceExisting) {
     for (const existing of entryQueries.getAll.all()) {
@@ -541,17 +622,27 @@ function parseEnvText(text: string): Array<{ key: string; value: string }> {
 vaultRouter.post('/import/env', requireAdminToken, (req, res) => {
   const body = readBody(req);
   const validated = validateImportEnv(body);
-  if (!validated.ok) return sendValidationError(res, validated.errors);
+  if (!validated.ok) {
+    sendValidationError(res, validated.errors);
+    return;
+  }
   const v = validated.value;
   const envText = v.env.trim();
-  if (!envText) return res.status(400).json({ error: '"env" string is required' });
+  if (!envText) {
+    res.status(400).json({ error: '"env" string is required' });
+    return;
+  }
   const pairs = parseEnvText(envText);
-  if (!pairs.length) return res.status(400).json({ error: 'No valid KEY=VALUE pairs found' });
+  if (!pairs.length) {
+    res.status(400).json({ error: 'No valid KEY=VALUE pairs found' });
+    return;
+  }
 
   const collectionName = v.collection ? v.collection.trim() : null;
   const collection = collectionName ? collectionQueries.getByName.get(collectionName) : null;
   if (collectionName && !collection) {
-    return res.status(400).json({ error: `Collection "${collectionName}" not found` });
+    res.status(400).json({ error: `Collection "${collectionName}" not found` });
+    return;
   }
   const project = v.project ?? '';
   const baseTags = Array.isArray(v.tags)
@@ -625,7 +716,10 @@ interface OpenClawPlugin {
 vaultRouter.post('/import/openclaw', requireAdminToken, (req, res) => {
   const body = readBody(req);
   const validated = validateImportOpenClaw(body);
-  if (!validated.ok) return sendValidationError(res, validated.errors);
+  if (!validated.ok) {
+    sendValidationError(res, validated.errors);
+    return;
+  }
   const { plugins, values, project, includePlaceholders } = validated.value;
 
   // Ensure top-level "openclaw" collection

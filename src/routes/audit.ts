@@ -170,7 +170,7 @@ auditRouter.post('/export/siem', requireAdminToken, async (req, res) => {
 auditRouter.get('/verify', requireAdminToken, (_req, res) => {
   const status = getAuditChainStatus();
   const result = verifyAuditChain();
-  if (!result.ok) return res.status(409).json({ ...result, ...status });
+  if (!result.ok) { res.status(409).json({ ...result, ...status }); return; }
   res.json({ ...result, ...status });
 });
 
@@ -198,5 +198,5 @@ auditRouter.post('/verify-now', requireAdminToken, async (_req, res) => {
 
 auditRouter.get('/:key_name', requireAdminToken, (req, res) => {
   const limit = Math.min(parseInt(req.query.limit as string ?? '50', 10), 200);
-  res.json(auditQueries.getForEntry.all(req.params.key_name, limit));
+  res.json(auditQueries.getForEntry.all(req.params.key_name!, limit));
 });

@@ -234,7 +234,7 @@ opsRouter.post('/backups/create', requireAdminToken, async (req, res) => {
 
 opsRouter.get('/backups/:filename/checksum', requireAdminToken, (req, res) => {
   try {
-    const result = verifyBackupChecksum(req.params.filename);
+    const result = verifyBackupChecksum(req.params.filename!);
     res.json(result);
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : String(err) });

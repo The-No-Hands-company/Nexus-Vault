@@ -176,7 +176,7 @@ app.use(rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests' },
-}));
+}) as unknown as express.RequestHandler);
 
 app.use(express.json({ limit: '64kb' }));
 app.use(httpObservabilityMiddleware);
@@ -216,10 +216,10 @@ function resolvePublicDir(): string {
     }
   }
 
-  return candidates[0];
+  return candidates[0]!;
 }
 
-const publicDir = resolvePublicDir();
+const publicDir: string = resolvePublicDir();
 app.use(express.static(publicDir));
 
 app.use('/api/keys', writeLimit, vaultRouter);

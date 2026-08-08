@@ -1,4 +1,5 @@
 import rateLimit from 'express-rate-limit';
+import type { RequestHandler } from 'express';
 
 /**
  * General write limit — 30 requests/min.
@@ -10,7 +11,7 @@ export const writeLimit = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many write requests' },
-});
+}) as unknown as RequestHandler;
 
 /**
  * Strict limit — 5 requests/min.
@@ -23,4 +24,4 @@ export const strictLimit = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: 'Too many requests for this operation' },
-});
+}) as unknown as RequestHandler;
