@@ -208,6 +208,39 @@ async function ssoRoleAllows(req: Request, allowed: Set<string>): Promise<boolea
   return allowed.has(String(user.role ?? '').toLowerCase());
 }
 
+
+const NEXUS_AUTH_PUBLIC_URL = (
+  process.env.NEXUS_AUTH_PUBLIC_URL ?? process.env.NEXUS_AUTH_URL ?? 'http://localhost:4310'
+).replace(/\/+$/, '');
+
+/**
+ * People get sent to the sign-in page; machines keep getting 401.
+ *
+ * The apex hosts the only login form, but nothing pointed at it — an
+ * unauthenticated navigation received a bare JSON 401, which reads as a wall of
+ * text rather than a way in. A request is treated as a navigation when it is a
+ * GET whose Accept mentions text/html, which is a property of the request rather
+ * than a guess about the client.
+ *
+ * Service tokens are unaffected: they arrive on API calls that do not ask for
+ * HTML, so a project pulling its keys still gets a machine-readable 401 rather
+ * than a redirect it cannot follow.
+ */
+function wantsHtml(req: Request): boolean {
+  return req.method === 'GET' && (req.headers.accept ?? '').includes('text/html');
+}
+
+function denyUnauthenticated(req: Request, res: Response, message: string): void {
+  if (wantsHtml(req)) {
+    const proto = (req.headers['x-forwarded-proto'] as string | undefined) ?? req.protocol;
+    const host = (req.headers['x-forwarded-host'] as string | undefined) ?? req.get('host') ?? '';
+    const here = `${proto}://${host}${req.originalUrl}`;
+    res.redirect(302, `${NEXUS_AUTH_PUBLIC_URL}/login?redirect=${encodeURIComponent(here)}`);
+    return;
+  }
+  res.status(401).json({ error: message });
+}
+
 /** Read-only access — service tokens for projects pulling keys, or an SSO session */
 export async function requireReadToken(req: Request, res: Response, next: NextFunction): Promise<void> {
   const token = extractBearer(req);
@@ -219,7 +252,7 @@ export async function requireReadToken(req: Request, res: Response, next: NextFu
     next();
     return;
   }
-  res.status(401).json({ error: 'Unauthorized' });
+  denyUnauthenticated(req, res, 'Unauthorized');
 }
 
 /** Admin access — creating, updating, deleting keys via dashboard/API */
@@ -233,5 +266,5 @@ export async function requireAdminToken(req: Request, res: Response, next: NextF
     next();
     return;
   }
-  res.status(401).json({ error: 'Unauthorized — admin token or an admin Nexus-Auth session required' });
+  denyUnauthenticated(req, res, 'Unauthorized — admin token or an admin Nexus-Auth session required');
 }
