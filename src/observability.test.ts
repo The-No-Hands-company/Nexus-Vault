@@ -47,7 +47,7 @@ afterEach(() => {
   delete process.env.VAULT_HTTP_METRICS_IGNORE_PATHS;
 });
 
-describe.sequential('httpObservabilityMiddleware', () => {
+describe('httpObservabilityMiddleware', () => {
   it('propagates x-request-id and emits normalized request metrics', async () => {
     const { request, cleanup } = await setupApp();
     try {
