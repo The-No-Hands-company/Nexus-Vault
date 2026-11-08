@@ -138,6 +138,21 @@ CREATE INDEX IF NOT EXISTS idx_vault_entry_versions_name ON vault_entry_versions
 CREATE INDEX IF NOT EXISTS idx_vault_entry_versions_name_version ON vault_entry_versions(entry_name, version);
 `,
   },
+  {
+    id: '006_one_time_burn_links',
+    sql: `
+CREATE TABLE IF NOT EXISTS vault_burn_links (
+  token TEXT PRIMARY KEY,
+  value_enc TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  max_views INTEGER NOT NULL DEFAULT 1,
+  view_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_vault_burn_links_expires ON vault_burn_links(expires_at);
+`,
+  },
 ];
 
 export function runMigrations(): string[] {
@@ -822,3 +837,51 @@ export function listAuditVerificationRuns(limit = 100): AuditVerificationRun[] {
   const safeLimit = Math.max(1, Math.min(limit, 1000));
   return verificationQueries.getRecent.all(safeLimit);
 }
+
+export interface VaultBurnLink {
+  token: string;
+  value_enc: string;
+  title: string;
+  max_views: number;
+  view_count: number;
+  created_at: string;
+  expires_at: string;
+}
+
+export const burnLinkQueries = {
+  insert: db.prepare<{
+    token: string;
+    value_enc: string;
+    title: string;
+    max_views: number;
+    expires_at: string;
+  }, void>(`
+    INSERT INTO vault_burn_links (token, value_enc, title, max_views, view_count, created_at, expires_at)
+    VALUES (@token, @value_enc, @title, @max_views, 0, datetime('now'), @expires_at)
+  `),
+  getByToken: db.prepare<[string], VaultBurnLink>(`
+    SELECT * FROM vault_burn_links WHERE token = ?
+  `),
+  incrementView: db.prepare<[string], void>(`
+    UPDATE vault_burn_links SET view_count = view_count + 1 WHERE token = ?
+  `),
+  delete: db.prepare<[string], void>(`
+    DELETE FROM vault_burn_links WHERE token = ?
+  `),
+  cleanupExpired: db.prepare<[], void>(`
+    DELETE FROM vault_burn_links WHERE datetime(expires_at) < datetime('now')
+  `),
+};
+
+export const rotationQueries = {
+  getExpiringSoon: db.prepare<[], VaultEntry>(`
+    SELECT * FROM vault_entries
+    WHERE is_active = 1 AND expires_at IS NOT NULL AND datetime(expires_at) <= datetime('now', '+7 days')
+    ORDER BY expires_at ASC
+  `),
+  getAllActiveWithExpiry: db.prepare<[], VaultEntry>(`
+    SELECT * FROM vault_entries
+    WHERE is_active = 1
+    ORDER BY CASE WHEN expires_at IS NOT NULL THEN 0 ELSE 1 END, expires_at ASC
+  `),
+};

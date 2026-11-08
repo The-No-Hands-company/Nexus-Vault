@@ -7,6 +7,6 @@ cd "$SCRIPT_DIR"
 echo "=== Nexus-Vault Quality Gate ==="
 
 echo "1. Running unit & integration tests..."
-bun test src/logger.test.ts src/observability.test.ts
+bun test src/logger.test.ts src/observability.test.ts src/routes/burn-share.test.ts
 
 echo "=== All Nexus-Vault checks passed! ==="

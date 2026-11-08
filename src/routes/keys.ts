@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
-import { collectionQueries, entryQueries, exportQueries, versionQueries, logAudit, parseMetadata, parseTags, serializeMetadata, serializeTags, normalizeVaultCategory, normalizeVaultEntryType, type VaultEntryType, type VaultCategory } from '../db.js';
+import { randomBytes } from 'node:crypto';
+import { collectionQueries, entryQueries, exportQueries, versionQueries, burnLinkQueries, rotationQueries, logAudit, parseMetadata, parseTags, serializeMetadata, serializeTags, normalizeVaultCategory, normalizeVaultEntryType, type VaultEntryType, type VaultCategory } from '../db.js';
 import { encrypt, decrypt } from '../crypto.js';
 import { requireReadToken, requireAdminToken } from '../auth.js';
 import { validateCreateEntry, validateUpdateEntry, validateCreateCollection, validateImportDocument, validateImportEnv, validateImportOpenClaw, validateCollectionName, validateEntryName, sendValidationError } from '../validate.js';
@@ -65,6 +66,121 @@ vaultRouter.get('/types', requireReadToken, (_req, res) => {
     { type: 'card', category: 'cards' },
     { type: 'secret', category: 'general' },
   ]);
+});
+
+// ── Burn-after-reading One-Time Share Links ──
+
+vaultRouter.post('/share', (req, res) => {
+  const body = readBody(req);
+  const secret = String(body.secret ?? '').trim();
+  if (!secret) {
+    res.status(400).json({ error: 'secret is required' });
+    return;
+  }
+  const title = String(body.title ?? '').trim();
+  const maxViews = Math.max(1, Math.min(parseInt(String(body.maxViews ?? '1'), 10) || 1, 10));
+  const expiresInSeconds = Math.max(60, Math.min(parseInt(String(body.expiresInSeconds ?? '86400'), 10) || 86400, 604800)); // default 24h, max 7d
+  const expiresAt = new Date(Date.now() + expiresInSeconds * 1000).toISOString();
+
+  const token = randomBytes(24).toString('hex');
+  const value_enc = encrypt(secret, MASTER);
+
+  burnLinkQueries.insert.run({
+    token,
+    value_enc,
+    title,
+    max_views: maxViews,
+    expires_at: expiresAt,
+  });
+
+  logAudit(title || 'one-time-secret', 'SHARE_CREATE', clientIp(req), (req.headers['user-agent'] as string) ?? '');
+
+  res.status(201).json({
+    token,
+    title,
+    shareUrl: `/share/${token}`,
+    expiresAt,
+    maxViews,
+  });
+});
+
+vaultRouter.get('/share/:token', (req, res) => {
+  const token = req.params.token;
+  const link = burnLinkQueries.getByToken.get(token);
+  if (!link) {
+    res.status(404).json({ error: 'One-time link not found or has already been burned' });
+    return;
+  }
+
+  // Check expiration
+  if (new Date(link.expires_at) < new Date()) {
+    burnLinkQueries.delete.run(token);
+    res.status(410).json({ error: 'This link has expired and has been destroyed' });
+    return;
+  }
+
+  let value: string;
+  try {
+    value = decrypt(link.value_enc, MASTER);
+  } catch {
+    res.status(500).json({ error: 'Failed to decrypt secret' });
+    return;
+  }
+
+  const newViewCount = link.view_count + 1;
+  const isBurned = newViewCount >= link.max_views;
+
+  if (isBurned) {
+    burnLinkQueries.delete.run(token);
+  } else {
+    burnLinkQueries.incrementView.run(token);
+  }
+
+  logAudit(link.title || 'one-time-secret', isBurned ? 'SHARE_BURNED' : 'SHARE_READ', clientIp(req), (req.headers['user-agent'] as string) ?? '');
+
+  res.json({
+    title: link.title,
+    secret: value,
+    burned: isBurned,
+    remainingViews: Math.max(0, link.max_views - newViewCount),
+    expiresAt: link.expires_at,
+  });
+});
+
+// ── Secret Rotation & Health Status ──
+
+vaultRouter.get('/rotation/status', requireReadToken, (_req, res) => {
+  const all = rotationQueries.getAllActiveWithExpiry.all();
+  const now = new Date();
+  const soon = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+
+  const expired: typeof all = [];
+  const expiringSoon: typeof all = [];
+  const healthy: typeof all = [];
+
+  for (const entry of all) {
+    if (entry.expires_at) {
+      const expDate = new Date(entry.expires_at);
+      if (expDate < now) {
+        expired.push(entry);
+      } else if (expDate <= soon) {
+        expiringSoon.push(entry);
+      } else {
+        healthy.push(entry);
+      }
+    } else {
+      healthy.push(entry);
+    }
+  }
+
+  res.json({
+    total: all.length,
+    expiredCount: expired.length,
+    expiringSoonCount: expiringSoon.length,
+    healthyCount: healthy.length,
+    expired: expired.map((e) => safeEntry(e)),
+    expiringSoon: expiringSoon.map((e) => safeEntry(e)),
+  });
 });
 
 vaultRouter.get('/categories', requireReadToken, (_req, res) => {

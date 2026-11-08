@@ -420,10 +420,15 @@
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
           <input type="text" id="search-input" placeholder="search keys, tags, projects…" oninput="handleSearch()" />
         </div>
-        <button class="btn btn-primary" onclick="openCreateModal()">
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-          New Key
-        </button>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-ghost" onclick="openBurnModal()">
+            🔥 Burn Share
+          </button>
+          <button class="btn btn-primary" onclick="openCreateModal()">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            New Key
+          </button>
+        </div>
       </div>
 
       <div id="keys-panel">
@@ -494,6 +499,53 @@
     <div class="modal-footer">
       <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
       <button class="btn btn-primary" onclick="submitKey()" id="modal-submit-btn">Save Key</button>
+    </div>
+  </div>
+</div>
+
+<!-- Burn Link Modal -->
+<div class="modal-overlay" id="burn-modal-overlay" onclick="closeBurnModal(event)">
+  <div class="modal" onclick="event.stopPropagation()">
+    <h2>🔥 One-Time Burn Secret Share</h2>
+    <p style="color:var(--muted);font-size:11px;margin-bottom:12px">
+      Generate an encrypted link that self-destructs immediately after reading.
+    </p>
+    <div class="field">
+      <label>Title / Reference (optional)</label>
+      <input type="text" id="burn-title" placeholder="Stripe Production Secret" />
+    </div>
+    <div class="field">
+      <label>Secret Value</label>
+      <textarea id="burn-secret" rows="4" placeholder="Paste sensitive token, credential, or key..." style="width:100%;background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:8px;color:var(--text);font-family:var(--mono);font-size:12px;outline:none"></textarea>
+    </div>
+    <div class="field" style="display:grid;grid-template-columns:1fr 1fr;gap:10px">
+      <div>
+        <label>View Limit</label>
+        <select id="burn-views" style="width:100%;background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:6px;color:var(--text);font-family:var(--mono);font-size:12px">
+          <option value="1">1 View (Burn on read)</option>
+          <option value="2">2 Views</option>
+          <option value="5">5 Views</option>
+        </select>
+      </div>
+      <div>
+        <label>Expires After</label>
+        <select id="burn-ttl" style="width:100%;background:var(--bg);border:1px solid var(--border2);border-radius:4px;padding:6px;color:var(--text);font-family:var(--mono);font-size:12px">
+          <option value="3600">1 Hour</option>
+          <option value="86400" selected>24 Hours</option>
+          <option value="604800">7 Days</option>
+        </select>
+      </div>
+    </div>
+    <div id="burn-result-wrap" style="display:none;margin-top:12px;padding:12px;background:rgba(0,229,160,0.08);border:1px solid var(--accent);border-radius:6px">
+      <div style="font-size:11px;color:var(--accent);font-weight:600;margin-bottom:6px">One-Time Secret Link Generated:</div>
+      <div style="display:flex;gap:6px">
+        <input type="text" id="burn-result-url" readonly style="flex:1;background:var(--bg);border:1px solid var(--border2);padding:6px;color:var(--text);font-family:var(--mono);font-size:11px" />
+        <button class="btn btn-primary btn-sm" onclick="copyBurnUrl()">Copy</button>
+      </div>
+    </div>
+    <div class="modal-footer" style="margin-top:16px">
+      <button class="btn btn-ghost" onclick="closeBurnModal()">Close</button>
+      <button class="btn btn-primary" onclick="submitBurnShare()" id="burn-submit-btn">Create Burn Link</button>
     </div>
   </div>
 </div>
@@ -702,6 +754,60 @@
   function closeModal(e) {
     if (e && e.target !== document.getElementById('modal-overlay')) return;
     document.getElementById('modal-overlay').classList.remove('open');
+  }
+
+  function openBurnModal() {
+    document.getElementById('burn-title').value = '';
+    document.getElementById('burn-secret').value = '';
+    document.getElementById('burn-result-wrap').style.display = 'none';
+    document.getElementById('burn-modal-overlay').classList.add('open');
+  }
+
+  function closeBurnModal(e) {
+    if (e && e.target !== document.getElementById('burn-modal-overlay')) return;
+    document.getElementById('burn-modal-overlay').classList.remove('open');
+  }
+
+  async function submitBurnShare() {
+    const secret = document.getElementById('burn-secret').value.trim();
+    if (!secret) { toast('Secret value is required', true); return; }
+    const title = document.getElementById('burn-title').value.trim();
+    const maxViews = parseInt(document.getElementById('burn-views').value, 10) || 1;
+    const expiresInSeconds = parseInt(document.getElementById('burn-ttl').value, 10) || 86400;
+
+    const btn = document.getElementById('burn-submit-btn');
+    btn.textContent = 'Generating…';
+    btn.disabled = true;
+
+    try {
+      const res = await fetch('/api/keys/share', {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({ secret, title, maxViews, expiresInSeconds })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        toast(err.error || 'Failed to create share link', true);
+        return;
+      }
+      const data = await res.json();
+      const shareFullUrl = window.location.origin + '/api/keys' + data.shareUrl;
+      document.getElementById('burn-result-url').value = shareFullUrl;
+      document.getElementById('burn-result-wrap').style.display = 'block';
+      toast('One-time link generated!');
+    } catch {
+      toast('Network error creating burn link', true);
+    } finally {
+      btn.textContent = 'Create Burn Link';
+      btn.disabled = false;
+    }
+  }
+
+  function copyBurnUrl() {
+    const input = document.getElementById('burn-result-url');
+    input.select();
+    navigator.clipboard.writeText(input.value);
+    toast('Copied one-time link to clipboard!');
   }
 
   async function submitKey() {
