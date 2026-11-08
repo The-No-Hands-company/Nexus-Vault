@@ -12,7 +12,6 @@
  *   AWS_SECRET_ACCESS_KEY    — credentials
  */
 
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 import fs from 'fs';
 import path from 'path';
 
@@ -20,7 +19,8 @@ export type SyncResult =
   | { uploaded: true; bucket: string; key: string }
   | { uploaded: false; skipped?: true; error?: string };
 
-function buildClient(): S3Client {
+async function buildClient() {
+  const { S3Client } = await import('@aws-sdk/client-s3');
   const region = process.env.VAULT_BACKUP_S3_REGION?.trim() ?? 'us-east-1';
   const endpoint = process.env.VAULT_BACKUP_S3_ENDPOINT?.trim();
   return new S3Client({
@@ -43,7 +43,8 @@ export async function syncBackupToCloud(backupPath: string): Promise<SyncResult>
   const filename = path.basename(backupPath);
   const key = `${prefix}/${filename}`;
 
-  const client = buildClient();
+  const client = await buildClient();
+  const { PutObjectCommand } = await import('@aws-sdk/client-s3');
 
   try {
     await client.send(

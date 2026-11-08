@@ -267,7 +267,7 @@ app.get('/api/ready', (_req, res) => {
   });
 });
 
-app.get('*', (_req, res) => {
+app.use((_req, res) => {
   res.sendFile(path.join(publicDir, 'index.html'));
 });
 
