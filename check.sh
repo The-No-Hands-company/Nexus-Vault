@@ -7,6 +7,6 @@ cd "$SCRIPT_DIR"
 echo "=== Nexus-Vault Quality Gate ==="
 
 echo "1. Running unit & integration tests..."
-bun test src/logger.test.ts src/observability.test.ts src/routes/burn-share.test.ts
+bun test --preload ./src/test-setup.ts --timeout 15000
 
 echo "=== All Nexus-Vault checks passed! ==="

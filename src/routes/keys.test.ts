@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mock } from 'bun:test';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -363,6 +364,17 @@ function createDbMockModule() {
         get: (name: string) => ({ count: versions.filter((v) => v.entry_name === name).length }),
       },
     },
+    burnLinkQueries: {
+      insert: { run: (_payload: unknown) => void 0 },
+      getByToken: { get: (_token: string) => null as unknown },
+      incrementView: { run: (_token: string) => void 0 },
+      delete: { run: (_token: string) => void 0 },
+      cleanupExpired: { run: () => void 0 },
+    },
+    rotationQueries: {
+      getExpiringSoon: { all: () => [] as unknown[] },
+      getAllActiveWithExpiry: { all: () => [] as unknown[] },
+    },
     logAudit: (_entry_name: string, _action: string, _ip = 'unknown', _user_agent = '', _meta = '') => void 0,
     parseMetadata,
     parseTags,
@@ -375,19 +387,28 @@ function createDbMockModule() {
     isVaultEntryType,
     isVaultCategory,
     inferVaultCategory,
+    _reset: () => {
+      collections.length = 0;
+      entries.length = 0;
+      versions.length = 0;
+      importExports.length = 0;
+      collectionId = 1;
+      entryId = 1;
+      versionId = 1;
+    },
   };
 }
 
+// Top-level mock registrations — Bun requires these at module scope to intercept
+// static imports of dynamically-loaded route modules.
+const _sharedDbMock = createDbMockModule();
+mock.module('../db.js', () => _sharedDbMock);
+mock.module('../crypto.js', () => ({
+  encrypt: (plaintext: string) => `enc:${plaintext}`,
+  decrypt: (ciphertext: string) => (ciphertext.startsWith('enc:') ? ciphertext.slice(4) : ciphertext),
+}));
+
 async function setupTestApp() {
-  vi.resetModules();
-
-  const dbMock = createDbMockModule();
-  vi.doMock('../db.js', () => dbMock);
-  vi.doMock('../crypto.js', () => ({
-    encrypt: (plaintext: string) => `enc:${plaintext}`,
-    decrypt: (ciphertext: string) => (ciphertext.startsWith('enc:') ? ciphertext.slice(4) : ciphertext),
-  }));
-
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'nexus-vault-test-'));
   process.env.VAULT_DATA_DIR = dataDir;
   process.env.VAULT_ACCESS_TOKEN = 'read-token-1234567890abcdef'; // pragma: allowlist secret
@@ -447,13 +468,14 @@ async function setupTestApp() {
 }
 
 afterEach(() => {
+  _sharedDbMock._reset();
   delete process.env.VAULT_DATA_DIR;
   delete process.env.VAULT_ACCESS_TOKEN;
   delete process.env.VAULT_ADMIN_TOKEN;
   delete process.env.VAULT_MASTER_SECRET;
 });
 
-describe.sequential('vaultRouter import contracts', () => {
+describe('vaultRouter import contracts', () => {
   it('parses .env edge cases (comments, export prefix, quoted values)', async () => {
     const { request, cleanup } = await setupTestApp();
     try {
@@ -574,7 +596,7 @@ describe.sequential('vaultRouter import contracts', () => {
       const withReadToken = await request('GET', '/api/keys/export', 'read-token-1234567890abcdef');
       expect(withReadToken.status).toBe(401);
       expect(withReadToken.payload).toMatchObject({
-        error: 'Unauthorized — admin token required',
+        error: 'Unauthorized — admin token or an admin Nexus-Auth session required',
       });
 
       const withAdminToken = await request('GET', '/api/keys/export', 'admin-token-1234567890abcdef');
@@ -592,7 +614,7 @@ describe.sequential('vaultRouter import contracts', () => {
   });
 });
 
-describe.sequential('vaultRouter validation regressions', () => {
+describe('vaultRouter validation regressions', () => {
   function expectValidationFailure(result: { status: number; payload: unknown }, expectedField?: string) {
     expect(result.status).toBe(400);
     expect(result.payload).toMatchObject({ error: 'Validation failed' });
@@ -713,7 +735,7 @@ describe.sequential('vaultRouter validation regressions', () => {
   });
 });
 
-describe.sequential('vaultRouter production hardening', () => {
+describe('vaultRouter production hardening', () => {
   it('returns 410 Gone for expired entries', async () => {
     const { request, cleanup } = await setupTestApp();
     try {
@@ -800,7 +822,7 @@ describe.sequential('vaultRouter production hardening', () => {
   });
 });
 
-describe.sequential('vaultRouter version history and restore', () => {
+describe('vaultRouter version history and restore', () => {
   it('archives a version on DELETE with reason=delete', async () => {
     const { request, cleanup } = await setupTestApp();
     try {
@@ -895,262 +917,7 @@ describe.sequential('vaultRouter version history and restore', () => {
   });
 });
 
-describe.sequential('vaultRouter version history and restore', () => {
-  it('archives a version on DELETE with reason=delete', async () => {
-    const { request, cleanup } = await setupTestApp();
-    try {
-      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
-        name: 'to-delete',
-        value: 'delete-me',
-        type: 'secret',
-      });
-
-      const del = await request('DELETE', '/api/keys/to-delete', 'admin-token-1234567890abcdef');
-      expect(del.status).toBe(200);
-      expect(del.payload).toMatchObject({ ok: true });
-
-      // Entry should be gone
-      const gone = await request('GET', '/api/keys/to-delete', 'read-token-1234567890abcdef');
-      expect(gone.status).toBe(404);
-    } finally {
-      await cleanup();
-    }
-  });
-
-  it('GET /stats returns total, byType, byCategory, expiringSoon', async () => {
-    const { request, cleanup } = await setupTestApp();
-    try {
-      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
-        name: 'stat-key-1',
-        value: 'v1',
-        type: 'token',
-      });
-      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
-        name: 'stat-key-2',
-        value: 'v2',
-        type: 'secret',
-      });
-
-      const stats = await request('GET', '/api/keys/stats', 'read-token-1234567890abcdef');
-      expect(stats.status).toBe(200);
-      const body = stats.payload as { total: number; byType: Array<{ type: string; count: number }>; byCategory: unknown[]; expiringSoon: { days7: number; days30: number } };
-      expect(body.total).toBe(2);
-      expect(Array.isArray(body.byType)).toBe(true);
-      expect(Array.isArray(body.byCategory)).toBe(true);
-      expect(body.expiringSoon).toMatchObject({ days7: 0, days30: 0 });
-
-      // Reject read from unauthenticated
-      const unauth = await request('GET', '/api/keys/stats', 'wrong-token');
-      expect(unauth.status).toBe(401);
-    } finally {
-      await cleanup();
-    }
-  });
-
-  it('POST /:name/restore/:version restores archived value and archives current', async () => {
-    const { request, cleanup } = await setupTestApp();
-    try {
-      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
-        name: 'restorable',
-        value: 'v0-original',
-        type: 'secret',
-      });
-      // Create 2 versions by updating twice
-      await request('PUT', '/api/keys/restorable', 'admin-token-1234567890abcdef', { value: 'v1-updated' });
-      await request('PUT', '/api/keys/restorable', 'admin-token-1234567890abcdef', { value: 'v2-updated' });
-
-      // Current value should be v2-updated
-      const current = await request('GET', '/api/keys/restorable', 'read-token-1234567890abcdef');
-      expect(current.payload).toMatchObject({ value: 'v2-updated' });
-
-      // Restore version 1 (v0-original)
-      const restore = await request('POST', '/api/keys/restorable/restore/1', 'admin-token-1234567890abcdef');
-      expect(restore.status).toBe(200);
-      expect(restore.payload).toMatchObject({ ok: true, name: 'restorable', restoredVersion: 1 });
-
-      // Current value should now be v0-original
-      const afterRestore = await request('GET', '/api/keys/restorable', 'read-token-1234567890abcdef');
-      expect(afterRestore.payload).toMatchObject({ value: 'v0-original' });
-
-      // Version list should now have 3 entries (v1 + v2 + the 'restore' snapshot of v2)
-      const versions = await request('GET', '/api/keys/restorable/versions', 'admin-token-1234567890abcdef');
-      expect(versions.status).toBe(200);
-      expect((versions.payload as unknown[]).length).toBe(3);
-
-      // Non-existent version returns 404
-      const notFound = await request('POST', '/api/keys/restorable/restore/99', 'admin-token-1234567890abcdef');
-      expect(notFound.status).toBe(404);
-
-      // Read token cannot restore (admin required)
-      const forbidden = await request('POST', '/api/keys/restorable/restore/1', 'read-token-1234567890abcdef');
-      expect(forbidden.status).toBe(401);
-    } finally {
-      await cleanup();
-    }
-  });
-});
-
-describe.sequential('vaultRouter sprint-4 hardening: input limits, soft-delete lifecycle, search filters', () => {
-  it('rejects value longer than 32768 characters', async () => {
-    const { request, cleanup } = await setupTestApp();
-    try {
-      const res = await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
-        name: 'big-val',
-        value: 'x'.repeat(32769),
-      });
-      expect(res.status).toBe(400);
-      expect(res.payload).toMatchObject({ error: 'Validation failed' });
-      const details = (res.payload as { details?: Array<{ field?: string }> }).details;
-      expect(details?.some((d) => d.field === 'value')).toBe(true);
-    } finally {
-      await cleanup();
-    }
-  });
-
-  it('rejects update value longer than 32768 characters', async () => {
-    const { request, cleanup } = await setupTestApp();
-    try {
-      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', { name: 'val-update', value: 'ok' });
-      const res = await request('PUT', '/api/keys/val-update', 'admin-token-1234567890abcdef', {
-        value: 'x'.repeat(32769),
-      });
-      expect(res.status).toBe(400);
-      const details = (res.payload as { details?: Array<{ field?: string }> }).details;
-      expect(details?.some((d) => d.field === 'value')).toBe(true);
-    } finally {
-      await cleanup();
-    }
-  });
-
-  it('rejects tags with more than 50 items', async () => {
-    const { request, cleanup } = await setupTestApp();
-    try {
-      const res = await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
-        name: 'many-tags',
-        value: 'v',
-        tags: Array.from({ length: 51 }, (_, i) => `tag-${i}`),
-      });
-      expect(res.status).toBe(400);
-      const details = (res.payload as { details?: Array<{ field?: string }> }).details;
-      expect(details?.some((d) => d.field === 'tags')).toBe(true);
-    } finally {
-      await cleanup();
-    }
-  });
-
-  it('rejects metadata serialised to more than 16KB', async () => {
-    const { request, cleanup } = await setupTestApp();
-    try {
-      const bigMeta: Record<string, string> = {};
-      for (let i = 0; i < 200; i++) bigMeta[`key${i}`] = 'x'.repeat(100);
-      const res = await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
-        name: 'big-meta',
-        value: 'v',
-        metadata: bigMeta,
-      });
-      expect(res.status).toBe(400);
-      const details = (res.payload as { details?: Array<{ field?: string }> }).details;
-      expect(details?.some((d) => d.field === 'metadata')).toBe(true);
-    } finally {
-      await cleanup();
-    }
-  });
-
-  it('GET /deleted lists soft-deleted entries; POST /undelete reactivates them', async () => {
-    const { request, cleanup } = await setupTestApp();
-    try {
-      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
-        name: 'to-undelete',
-        value: 'resurrect-me',
-        type: 'secret',
-      });
-      await request('DELETE', '/api/keys/to-undelete', 'admin-token-1234567890abcdef');
-
-      const deleted = await request('GET', '/api/keys/deleted', 'admin-token-1234567890abcdef');
-      expect(deleted.status).toBe(200);
-      const list = deleted.payload as Array<{ name: string }>;
-      expect(Array.isArray(list)).toBe(true);
-      expect(list.some((e) => e.name === 'to-undelete')).toBe(true);
-
-      const unauth = await request('GET', '/api/keys/deleted', 'read-token-1234567890abcdef');
-      expect(unauth.status).toBe(401);
-
-      const undelete = await request('POST', '/api/keys/to-undelete/undelete', 'admin-token-1234567890abcdef');
-      expect(undelete.status).toBe(200);
-      expect(undelete.payload).toMatchObject({ name: 'to-undelete' });
-
-      const restored = await request('GET', '/api/keys/to-undelete', 'read-token-1234567890abcdef');
-      expect(restored.status).toBe(200);
-      expect(restored.payload).toMatchObject({ name: 'to-undelete', value: 'resurrect-me' });
-
-      const conflict = await request('POST', '/api/keys/to-undelete/undelete', 'admin-token-1234567890abcdef');
-      expect(conflict.status).toBe(409);
-    } finally {
-      await cleanup();
-    }
-  });
-
-  it('GET /versions is accessible for deleted entries', async () => {
-    const { request, cleanup } = await setupTestApp();
-    try {
-      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
-        name: 'versioned-del',
-        value: 'v0',
-        type: 'secret',
-      });
-      await request('PUT', '/api/keys/versioned-del', 'admin-token-1234567890abcdef', { value: 'v1' });
-      await request('DELETE', '/api/keys/versioned-del', 'admin-token-1234567890abcdef');
-
-      const versions = await request('GET', '/api/keys/versioned-del/versions', 'admin-token-1234567890abcdef');
-      expect(versions.status).toBe(200);
-      expect(Array.isArray(versions.payload)).toBe(true);
-      expect((versions.payload as unknown[]).length).toBeGreaterThanOrEqual(1);
-    } finally {
-      await cleanup();
-    }
-  });
-
-  it('GET /search filters by ?type= and ?category=', async () => {
-    const { request, cleanup } = await setupTestApp();
-    try {
-      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
-        name: 'search-token-one',
-        value: 'v',
-        type: 'token',
-        category: 'credentials',
-      });
-      await request('POST', '/api/keys', 'admin-token-1234567890abcdef', {
-        name: 'search-apikey-two',
-        value: 'v',
-        type: 'api-key',
-        category: 'config',
-      });
-
-      const byType = await request('GET', '/api/keys/search?q=search&type=token', 'read-token-1234567890abcdef');
-      expect(byType.status).toBe(200);
-      const typeList = byType.payload as Array<{ type: string }>;
-      expect(typeList.every((e) => e.type === 'token')).toBe(true);
-      expect(typeList.some((e) => e.type === 'api-key')).toBe(false);
-
-      const byCat = await request('GET', '/api/keys/search?q=search&category=config', 'read-token-1234567890abcdef');
-      expect(byCat.status).toBe(200);
-      const catList = byCat.payload as Array<{ category: string }>;
-      expect(catList.every((e) => e.category === 'config')).toBe(true);
-
-      const noMatch = await request(
-        'GET',
-        '/api/keys/search?q=search&type=token&category=config',
-        'read-token-1234567890abcdef',
-      );
-      expect(noMatch.status).toBe(200);
-      expect((noMatch.payload as unknown[]).length).toBe(0);
-    } finally {
-      await cleanup();
-    }
-  });
-});
-
-describe.sequential('vaultRouter sprint-4 hardening: input limits, soft-delete lifecycle, search filters', () => {
+describe('vaultRouter sprint-4 hardening: input limits, soft-delete lifecycle, search filters', () => {
   it('rejects value longer than 32768 characters', async () => {
     const { request, cleanup } = await setupTestApp();
     try {

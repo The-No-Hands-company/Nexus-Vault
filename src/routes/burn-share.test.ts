@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeAll, afterAll } from 'bun:test';
+import { describe, expect, it, beforeAll, afterAll } from 'vitest';
 import http from 'node:http';
 import express from 'express';
 import { vaultRouter } from './keys.js';

@@ -1,81 +1,98 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { mock } from 'bun:test';
 import type { Server } from 'http';
 
+// Module-level mutable runtime state so tests don't bleed into each other.
+let _rs = { maintenanceMode: false, maintenanceReason: '', restoreInProgress: false };
+
+// Top-level mock registrations — Bun requires these at module scope.
+mock.module('../runtime-state.js', () => ({
+  getRuntimeState: () => ({ ..._rs }),
+  setMaintenanceMode: (enabled: boolean, reason = '') => {
+    _rs.maintenanceMode = enabled;
+    _rs.maintenanceReason = enabled ? reason.trim() : '';
+    return { ..._rs };
+  },
+  setRestoreInProgress: (value: boolean) => {
+    _rs.restoreInProgress = value;
+    return { ..._rs };
+  },
+  isWriteBlocked: () => _rs.maintenanceMode || _rs.restoreInProgress,
+}));
+
+mock.module('../db.js', () => ({
+  logAudit: vi.fn(),
+  getDatabaseMaintenanceState: vi.fn(() => ({ running: false, lastCompletedAt: null })),
+  runDatabaseMaintenance: vi.fn((operation: 'VACUUM' | 'ANALYZE') => ({
+    operation,
+    startedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    durationMs: 12,
+  })),
+}));
+
+mock.module('../metrics.js', () => ({
+  incCounter: vi.fn(),
+}));
+
+mock.module('../ops.js', () => ({
+  backupDirPath: () => './backups',
+  databasePath: () => './data/vault.db',
+  listBackups: () => [
+    {
+      filename: 'vault-2026-04-16.db',
+      bytes: 123,
+      createdAt: new Date().toISOString(),
+      sha256: 'a'.repeat(64),
+    },
+  ],
+  createBackup: async (filename?: string) => ({
+    filename: filename || 'vault-2026-04-16.db',
+    bytes: 123,
+    createdAt: new Date().toISOString(),
+    sha256: 'a'.repeat(64),
+    encrypted: false,
+    encryptionMode: 'none',
+  }),
+  enforceBackupRetention: () => ({ deleted: [], kept: 1 }),
+  verifyBackupChecksum: () => ({ ok: true, expected: 'a'.repeat(64), actual: 'a'.repeat(64) }),
+  createSignedBackupToken: (_action: string, _filename: string, _expires: number) => 'token-123',
+  verifySignedBackupToken: () => ({ action: 'backup-download', filename: 'vault-2026-04-16.db', exp: Math.floor(Date.now() / 1000) + 300 }),
+  writeUploadedBackup: async () => ({
+    filename: 'vault-upload.db',
+    bytes: 123,
+    createdAt: new Date().toISOString(),
+    sha256: 'a'.repeat(64),
+    encrypted: false,
+    encryptionMode: 'none',
+  }),
+  restoreBackup: (filename: string) => ({
+    restored: filename,
+    rows: {
+      collections: 1,
+      entries: 1,
+      importsExports: 0,
+      auditEvents: 0,
+      auditVerificationRuns: 0,
+    },
+  }),
+  restoreBackupDrill: (filename: string) => ({
+    drill: filename,
+    rows: {
+      collections: 1,
+      entries: 1,
+      importsExports: 0,
+      auditEvents: 0,
+      auditVerificationRuns: 0,
+    },
+    integrityOk: true,
+    integrityMessage: 'ok',
+    encrypted: false,
+    encryptionMode: 'none',
+  }),
+}));
+
 async function setupOpsTestApp() {
-  vi.resetModules();
-
-  vi.doMock('../db.js', () => ({
-    logAudit: vi.fn(),
-    getDatabaseMaintenanceState: vi.fn(() => ({ running: false, lastCompletedAt: null })),
-    runDatabaseMaintenance: vi.fn((operation: 'VACUUM' | 'ANALYZE') => ({
-      operation,
-      startedAt: new Date().toISOString(),
-      completedAt: new Date().toISOString(),
-      durationMs: 12,
-    })),
-  }));
-
-  vi.doMock('../metrics.js', () => ({
-    incCounter: vi.fn(),
-  }));
-
-  vi.doMock('../ops.js', () => ({
-    backupDirPath: () => './backups',
-    databasePath: () => './data/vault.db',
-    listBackups: () => [
-      {
-        filename: 'vault-2026-04-16.db',
-        bytes: 123,
-        createdAt: new Date().toISOString(),
-        sha256: 'a'.repeat(64),
-      },
-    ],
-    createBackup: async (filename?: string) => ({
-      filename: filename || 'vault-2026-04-16.db',
-      bytes: 123,
-      createdAt: new Date().toISOString(),
-      sha256: 'a'.repeat(64),
-      encrypted: false,
-      encryptionMode: 'none',
-    }),
-    enforceBackupRetention: () => ({ deleted: [], kept: 1 }),
-    verifyBackupChecksum: () => ({ ok: true, expected: 'a'.repeat(64), actual: 'a'.repeat(64) }),
-    createSignedBackupToken: (_action: string, _filename: string, _expires: number) => 'token-123',
-    verifySignedBackupToken: () => ({ action: 'backup-download', filename: 'vault-2026-04-16.db', exp: Math.floor(Date.now() / 1000) + 300 }),
-    writeUploadedBackup: async () => ({
-      filename: 'vault-upload.db',
-      bytes: 123,
-      createdAt: new Date().toISOString(),
-      sha256: 'a'.repeat(64),
-      encrypted: false,
-      encryptionMode: 'none',
-    }),
-    restoreBackup: (filename: string) => ({
-      restored: filename,
-      rows: {
-        collections: 1,
-        entries: 1,
-        importsExports: 0,
-        auditEvents: 0,
-        auditVerificationRuns: 0,
-      },
-    }),
-    restoreBackupDrill: (filename: string) => ({
-      drill: filename,
-      rows: {
-        collections: 1,
-        entries: 1,
-        importsExports: 0,
-        auditEvents: 0,
-        auditVerificationRuns: 0,
-      },
-      integrityOk: true,
-      integrityMessage: 'ok',
-      encrypted: false,
-      encryptionMode: 'none',
-    }),
-  }));
-
   process.env.VAULT_ACCESS_TOKEN = 'read-token-1234567890abcdef';
   process.env.VAULT_ADMIN_TOKEN = 'admin-token-1234567890abcdef';
   process.env.VAULT_MASTER_SECRET = 'test-master-secret';
@@ -128,19 +145,20 @@ async function setupOpsTestApp() {
 }
 
 afterEach(() => {
+  _rs = { maintenanceMode: false, maintenanceReason: '', restoreInProgress: false };
   delete process.env.VAULT_ACCESS_TOKEN;
   delete process.env.VAULT_ADMIN_TOKEN;
   delete process.env.VAULT_MASTER_SECRET;
   delete process.env.VAULT_DB_MAINTENANCE_MIN_INTERVAL_SECONDS;
 });
 
-describe.sequential('opsRouter operational APIs', () => {
+describe('opsRouter operational APIs', () => {
   it('requires admin token for backup inventory', async () => {
     const { request, cleanup } = await setupOpsTestApp();
     try {
       const result = await request('GET', '/api/ops/backups', 'read-token-1234567890abcdef');
       expect(result.status).toBe(401);
-      expect(result.payload).toMatchObject({ error: 'Unauthorized — admin token required' });
+      expect(result.payload).toMatchObject({ error: 'Unauthorized — admin token or an admin Nexus-Auth session required' });
     } finally {
       await cleanup();
     }

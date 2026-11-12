@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Server } from 'http';
 
 async function setupConfigTestApp() {
-  vi.resetModules();
 
   process.env.VAULT_ACCESS_TOKEN = 'read-token-1234567890abcdef';
   process.env.VAULT_ADMIN_TOKEN = 'admin-token-1234567890abcdef';
@@ -63,13 +62,13 @@ afterEach(() => {
   delete process.env.CORS_ORIGIN;
 });
 
-describe.sequential('configRouter checks', () => {
+describe('configRouter checks', () => {
   it('requires admin token', async () => {
     const { request, cleanup } = await setupConfigTestApp();
     try {
       const result = await request('read-token-1234567890abcdef');
       expect(result.status).toBe(401);
-      expect(result.payload).toMatchObject({ error: 'Unauthorized — admin token required' });
+      expect(result.payload).toMatchObject({ error: 'Unauthorized — admin token or an admin Nexus-Auth session required' });
     } finally {
       await cleanup();
     }

@@ -2,7 +2,6 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { Server } from 'http';
 
 async function setupMetricsTestApp() {
-  vi.resetModules();
 
   process.env.VAULT_ACCESS_TOKEN = 'read-token-1234567890abcdef';
   process.env.VAULT_ADMIN_TOKEN = 'admin-token-1234567890abcdef';
@@ -59,7 +58,7 @@ afterEach(() => {
   delete process.env.VAULT_METRICS_PUBLIC;
 });
 
-describe.sequential('metricsRouter', () => {
+describe('metricsRouter', () => {
   it('requires admin token when metrics are not public', async () => {
     const { request, cleanup } = await setupMetricsTestApp();
     try {

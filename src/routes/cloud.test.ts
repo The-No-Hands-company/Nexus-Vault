@@ -8,7 +8,6 @@ import {
 } from './cloud.js';
 
 async function setupCloudRouterTestApp() {
-  vi.resetModules();
   const express = (await import('express')).default;
   const { default: cloudRouter } = await import('./cloud.js');
 
