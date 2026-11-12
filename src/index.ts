@@ -166,6 +166,7 @@ const app = express();
 let isReady = false;
 let isDraining = false;
 let stopCloudHeartbeat: (() => void) | null = null;
+let stopMonitorHeartbeat: (() => void) | null = null;
 
 app.set('trust proxy', resolveTrustProxy());
 
@@ -292,6 +293,27 @@ const server = app.listen(PORT, () => {
   if (hasVaultCloudSystemsApiIntegration()) {
     stopCloudHeartbeat = startNexusVaultCloudRegistrationHeartbeat(PORT);
   }
+
+  const monitorUrl = (process.env.NEXUS_MONITOR_URL || 'http://localhost:3030').trim();
+  const sendVaultMonitorHeartbeat = (): void => {
+    fetch(`${monitorUrl}/api/v1/monitor/ingest`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        source: 'nexus-vault',
+        kind: 'heartbeat',
+        state: 'healthy',
+        timestamp: new Date().toISOString(),
+        endpoint: `http://localhost:${PORT}`,
+      }),
+    }).catch(() => {});
+  };
+  sendVaultMonitorHeartbeat();
+  const monitorTimer = setInterval(sendVaultMonitorHeartbeat, 30000);
+  if (typeof (monitorTimer as NodeJS.Timeout & { unref?: () => void }).unref === 'function') {
+    (monitorTimer as NodeJS.Timeout & { unref: () => void }).unref();
+  }
+  stopMonitorHeartbeat = () => clearInterval(monitorTimer);
 });
 
 function beginGracefulShutdown(signal: string): void {
@@ -302,6 +324,7 @@ function beginGracefulShutdown(signal: string): void {
   logger.info('shutdown.begin', { signal });
   stopPeriodicVerification(verificationTimer);
   stopCloudHeartbeat?.();
+  stopMonitorHeartbeat?.();
 
   const forceMs = Math.max(1000, parseInt(process.env.VAULT_SHUTDOWN_TIMEOUT_MS ?? '15000', 10));
   const forceTimer = setTimeout(() => {
